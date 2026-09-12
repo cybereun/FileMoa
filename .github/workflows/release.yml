@@ -28,5 +28,5 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "FileMoa ${{ github.ref_name }}"
           releaseBody: "FileMoa automatic update release."
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false

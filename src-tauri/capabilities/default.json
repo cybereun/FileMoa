@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "FileMoa desktop permissions",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default", "store:default", "updater:default"]
+  "permissions": ["core:default", "dialog:default", "store:default", "updater:default", "process:allow-restart"]
 }
