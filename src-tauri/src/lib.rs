@@ -13,6 +13,11 @@ fn execute_organization(plan: OrganizationPlan) -> Result<OrganizationPlan, Stri
 }
 
 #[tauri::command]
+fn undo_organization(plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
+    planner::undo_plan(plan)
+}
+
+#[tauri::command]
 fn find_duplicates(root_path: String, include_subfolders: bool) -> Result<Vec<planner::DuplicateGroup>, String> {
     planner::find_duplicates(&root_path, include_subfolders)
 }
@@ -23,7 +28,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![plan_organization, execute_organization, find_duplicates])
+        .invoke_handler(tauri::generate_handler![plan_organization, execute_organization, undo_organization, find_duplicates])
         .run(tauri::generate_context!())
         .expect("error while running FileMoa");
 }
