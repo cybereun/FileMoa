@@ -1,0 +1,14 @@
+node_modules/
+dist/
+target/
+src-tauri/target/
+.env*
+*.key
+keys/
+*.log
+*.tmp
+*.tsbuildinfo
+vite.config.js
+.agents/
+Thumbs.db
+.DS_Store
