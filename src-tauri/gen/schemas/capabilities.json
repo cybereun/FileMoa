@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"FileMoa desktop permissions","local":true,"windows":["main"],"permissions":["core:default","dialog:default","store:default","updater:default"]}}
+{"default":{"identifier":"default","description":"FileMoa desktop permissions","local":true,"windows":["main"],"permissions":["core:default","dialog:default","store:default","updater:default","process:allow-restart"]}}
