@@ -628,17 +628,24 @@ export default function App() {
       </nav>
 
       <section className="ribbon">
-        {ribbon.map(({ key, icon: Icon, action, disabled }) => <button key={key} onClick={() => void action()} disabled={busy || disabled}><Icon size={22} /><span>{t[key as keyof typeof t]}</span></button>)}
-        {tab === 'organize' && <>
-          {knownFolders.length > 0 && <div className="quick-folders" aria-label={t.quickFolders}><span className="quick-folders-label">{t.quickFolders}</span>{knownFolders.map((folder) => <button className="quick-folder" key={folder.id} onClick={() => chooseKnownFolder(folder)} disabled={busy} title={folder.path}><FolderOpen size={15} />{knownFolderLabel(folder.id)}</button>)}</div>}
-          <label className="ribbon-option"><input type="checkbox" checked={sub} onChange={(event) => setSub(event.target.checked)} />{t.sub}</label>
-          <label className="ribbon-option"><span>{t.basis}</span><select value={basis} onChange={(event) => setBasis(event.target.value)}><option value="type">{t.byType}</option><option value="date">{t.byDate}</option><option value="year">{t.byYear}</option><option value="size">{t.bySize}</option><option value="name">{t.byName}</option></select></label>
-          {(basis === 'date' || basis === 'year') && <label className="ribbon-option"><span>{t.dateBasis}</span><select value={dateBasis} onChange={(event) => setDateBasis(event.target.value)}><option value="created">{t.byCreated}</option><option value="modified">{t.byModified}</option><option value="accessed">{t.byAccessed}</option></select></label>}
-          <label className="ribbon-option"><span>{t.mode}</span><select value={mode} onChange={(event) => setMode(event.target.value)}><option value="safe">{t.safeMode}</option><option value="normal">{t.normalMode}</option><option value="strong">{t.strongMode}</option></select></label>
-          <label className="ribbon-option"><input type="checkbox" checked={includeHidden} onChange={(event) => setIncludeHidden(event.target.checked)} />{t.includeHidden}</label>
-          <label className="ribbon-option"><input type="checkbox" checked={multiRoot} onChange={(event) => { setMultiRoot(event.target.checked); if (!event.target.checked && paths.length > 1) { setPaths(paths.slice(0, 1)); setPath(paths[0]); } }} />{t.multiRoot}</label>
-        </>}
-        <code>{path || t.empty}</code>
+        <div className="ribbon-main">
+          <div className="ribbon-actions">
+            {ribbon.map(({ key, icon: Icon, action, disabled }) => <button key={key} onClick={() => void action()} disabled={busy || disabled}><Icon size={22} /><span>{t[key as keyof typeof t]}</span></button>)}
+          </div>
+          {tab === 'organize' && <div className="ribbon-controls">
+            <label className="ribbon-option"><input type="checkbox" checked={sub} onChange={(event) => setSub(event.target.checked)} />{t.sub}</label>
+            <label className="ribbon-option"><span>{t.basis}</span><select value={basis} onChange={(event) => setBasis(event.target.value)}><option value="type">{t.byType}</option><option value="date">{t.byDate}</option><option value="year">{t.byYear}</option><option value="size">{t.bySize}</option><option value="name">{t.byName}</option></select></label>
+            {(basis === 'date' || basis === 'year') && <label className="ribbon-option"><span>{t.dateBasis}</span><select value={dateBasis} onChange={(event) => setDateBasis(event.target.value)}><option value="created">{t.byCreated}</option><option value="modified">{t.byModified}</option><option value="accessed">{t.byAccessed}</option></select></label>}
+            <label className="ribbon-option"><span>{t.mode}</span><select value={mode} onChange={(event) => setMode(event.target.value)}><option value="safe">{t.safeMode}</option><option value="normal">{t.normalMode}</option><option value="strong">{t.strongMode}</option></select></label>
+            <label className="ribbon-option"><input type="checkbox" checked={includeHidden} onChange={(event) => setIncludeHidden(event.target.checked)} />{t.includeHidden}</label>
+            <label className="ribbon-option"><input type="checkbox" checked={multiRoot} onChange={(event) => { setMultiRoot(event.target.checked); if (!event.target.checked && paths.length > 1) { setPaths(paths.slice(0, 1)); setPath(paths[0]); } }} />{t.multiRoot}</label>
+          </div>}
+        </div>
+        {tab === 'organize' && knownFolders.length > 0 && <div className="quick-folders" aria-label={t.quickFolders}>
+          <span className="quick-folders-label">{t.quickFolders}</span>
+          {knownFolders.map((folder) => <button className="quick-folder" key={folder.id} onClick={() => chooseKnownFolder(folder)} disabled={busy} title={folder.path}><FolderOpen size={15} />{knownFolderLabel(folder.id)}</button>)}
+        </div>}
+        <code className="ribbon-path" title={path || t.empty}>{path || t.empty}</code>
       </section>
 
       {notice && <p className="notice">{notice}</p>}
