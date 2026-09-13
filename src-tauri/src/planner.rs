@@ -51,13 +51,13 @@ pub struct PlanRequest {
     /// `ko` or `en`. The core remains language-aware so folder names match the UI.
     #[serde(default = "default_language")]
     pub language: String,
-    /// `type`, `date`, `year`, `size`, or `name`.
+    /// `type`, `date` (year/month), `date_day` (year/month/day), `year`, `size`, or `name`.
     #[serde(default = "default_basis")]
     pub basis: String,
     /// `safe`, `normal`, or `strong`. All modes still require preview/approval.
     #[serde(default = "default_mode")]
     pub mode: String,
-    /// `created`, `modified`, or `accessed` when `basis` is date/year.
+    /// `created`, `modified`, or `accessed` when `basis` is date/date_day/year.
     #[serde(default = "default_date_basis")]
     pub date_basis: String,
     #[serde(default)]
@@ -448,10 +448,15 @@ fn category_for(path: &Path, metadata: &fs::Metadata, req: &PlanRequest) -> (Str
     if let Some((category, reason)) = keyword_category(path, &req.keyword_rules) {
         return (sanitize_category(&category, &req.language), reason);
     }
-    if req.basis.eq_ignore_ascii_case("date") || req.basis.eq_ignore_ascii_case("year") {
+    if req.basis.eq_ignore_ascii_case("date")
+        || req.basis.eq_ignore_ascii_case("date_day")
+        || req.basis.eq_ignore_ascii_case("year")
+    {
         if let Some(date) = metadata_time(metadata, &req.date_basis) {
             let category = if req.basis.eq_ignore_ascii_case("year") {
                 date.format("%Y").to_string()
+            } else if req.basis.eq_ignore_ascii_case("date_day") {
+                date.format("%Y-%m-%d").to_string()
             } else {
                 date.format("%Y/%m").to_string()
             };
@@ -1061,6 +1066,21 @@ mod tests {
         });
         let plan = create_plan(req).expect("plan");
         assert_eq!(plan.actions[0].category, "Receipts");
+    }
+
+    #[test]
+    fn date_day_basis_uses_year_month_day_folder() {
+        let directory = tempdir().expect("temp directory");
+        fs::write(directory.path().join("report.pdf"), b"pdf").expect("source");
+        let mut req = request(directory.path());
+        req.basis = "date_day".into();
+        let plan = create_plan(req).expect("plan");
+        let category = &plan.actions[0].category;
+        let parts = category.split('-').collect::<Vec<_>>();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].len(), 4);
+        assert!(parts[1].parse::<u32>().is_ok());
+        assert!(parts[2].parse::<u32>().is_ok());
     }
 
     #[test]
