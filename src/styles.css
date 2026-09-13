@@ -75,7 +75,7 @@ main {
   padding: 28px clamp(16px, 4vw, 40px) 52px;
 }
 
-header {
+.top-nav {
   position: relative;
   display: flex;
   align-items: center;
@@ -99,8 +99,21 @@ header {
 .brand h1 {
   margin: 0;
   color: var(--ink);
-  font-size: clamp(24px, 3vw, 30px);
+  font-size: 21px;
   letter-spacing: -0.03em;
+}
+
+.brand-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.app-version {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .brand p {
@@ -1054,6 +1067,31 @@ header {
   align-items: center;
   gap: 7px;
   color: var(--success);
+}
+
+.update-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 72px;
+  color: var(--muted-strong);
+}
+
+.update-state p {
+  margin: 0;
+}
+
+.status-error {
+  color: var(--danger) !important;
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .modal-actions {

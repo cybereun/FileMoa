@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { check, type Update } from '@tauri-apps/plugin-updater';
+import packageJson from '../package.json';
 import {
   Bot,
   CheckCircle2,
@@ -86,6 +87,9 @@ type AiResult = {
 };
 type Tab = 'organize' | 'manage' | 'safety';
 type Panel = 'plan' | 'categories' | 'duplicates' | 'history' | 'large' | 'empty' | 'ai';
+type UpdateDialogState = 'idle' | 'loading' | 'available' | 'latest' | 'error';
+
+const APP_VERSION = packageJson.version;
 
 const labels = {
   ko: {
@@ -101,8 +105,8 @@ const labels = {
     getKey: '공식 키 발급 주소', localOnly: '키는 이 Windows 계정의 암호화 저장소에만 보관됩니다.',
     ollamaReady: 'Ollama 감지됨', ollamaMissing: 'Ollama가 실행 중이 아닙니다', ollamaModels: '설치된 모델',
     updateTitle: 'FileMoa 업데이트', currentVersion: '현재 버전', newVersion: '새 버전', installNow: '지금 설치',
-    installLater: '나중에 설치', latest: '최신 버전을 사용하고 있습니다.', updateAvailable: '새 업데이트가 준비되었습니다.',
-    updateLoading: '업데이트 정보를 확인하는 중…', updateInstalling: '업데이트를 다운로드하고 설치하는 중…', retry: '다시 시도',
+    installLater: '나중에 설치', close: '닫기', latest: '최신 버전을 사용하고 있습니다.', updateAvailable: '새 업데이트가 준비되었습니다.',
+    updateLoading: '업데이트 정보를 확인하는 중…', updateInstalling: '업데이트를 다운로드하고 설치하는 중…', updateErrorTitle: '업데이트 확인 실패', updateErrorFallback: '업데이트 정보를 가져오지 못했습니다.', retry: '다시 시도',
     runAi: 'AI 분류 실행', reviewRequired: '검토 필요', newCategory: '새 카테고리 제안', requestCount: '요청 수', applySuggestions: '선택한 제안을 계획에 반영',
     basis: '분류 기준', byType: '파일 형식', byDate: '날짜', byYear: '연도', bySize: '파일 크기', byName: '파일명 규칙', dateBasis: '날짜 종류', byCreated: '생성 날짜', byModified: '수정 날짜', byAccessed: '마지막 사용', quickFolders: '빠른 폴더', desktop: '바탕화면', downloads: '다운로드', documents: '문서', pictures: '사진', videos: '동영상', music: '음악', includeHidden: '숨김 파일 포함', multiRoot: '여러 폴더', mode: '정리 모드', safeMode: '안전', normalMode: '일반', strongMode: '강력', exceptions: '예외 목록', exceptionHint: '폴더 경로 또는 확장자를 입력하면 정리에서 제외합니다.', addException: '예외 추가',
     errors: '오류', warnings: '주의', status: '상태', collision: '이름 충돌', select: '선택', recycle: '휴지통으로 보내기', emptyHint: '삭제하지 않고 후보만 표시합니다.', largeHint: '크기순으로 표시합니다. 삭제하지 않습니다.', largeThreshold: '최소 크기(MB)',
@@ -121,8 +125,8 @@ const labels = {
     getKey: 'Official key page', localOnly: 'Keys stay in an encrypted store bound to this Windows account.',
     ollamaReady: 'Ollama detected', ollamaMissing: 'Ollama is not running', ollamaModels: 'Installed models',
     updateTitle: 'FileMoa update', currentVersion: 'Current version', newVersion: 'New version', installNow: 'Install now',
-    installLater: 'Install later', latest: 'You already have the latest version.', updateAvailable: 'A new update is available.',
-    updateLoading: 'Checking for updates…', updateInstalling: 'Downloading and installing the update…', retry: 'Retry',
+    installLater: 'Install later', close: 'Close', latest: 'You already have the latest version.', updateAvailable: 'A new update is available.',
+    updateLoading: 'Checking for updates…', updateInstalling: 'Downloading and installing the update…', updateErrorTitle: 'Update check failed', updateErrorFallback: 'The update information could not be retrieved.', retry: 'Retry',
     runAi: 'Run AI classification', reviewRequired: 'Review required', newCategory: 'New category suggestion', requestCount: 'Requests', applySuggestions: 'Apply selected suggestions to plan',
     basis: 'Classification basis', byType: 'File type', byDate: 'Date', byYear: 'Year', bySize: 'File size', byName: 'Filename rules', dateBasis: 'Date field', byCreated: 'Created', byModified: 'Modified', byAccessed: 'Last accessed', quickFolders: 'Quick folders', desktop: 'Desktop', downloads: 'Downloads', documents: 'Documents', pictures: 'Pictures', videos: 'Videos', music: 'Music', includeHidden: 'Include hidden files', multiRoot: 'Multiple folders', mode: 'Organization mode', safeMode: 'Safe', normalMode: 'Normal', strongMode: 'Strong', exceptions: 'Exclusions', exceptionHint: 'Paths or extensions entered here are excluded from organization.', addException: 'Add exclusion',
     errors: 'Errors', warnings: 'Warnings', status: 'Status', collision: 'Collision', select: 'Select', recycle: 'Move to Recycle Bin', emptyHint: 'Candidates are shown only; nothing is deleted.', largeHint: 'Sorted by size; nothing is deleted.', largeThreshold: 'Minimum size (MB)', undoPreview: 'Undo preview', undoConfirm: 'Undo selected run', cancel: 'Cancel', moved: 'Moved', skipped: 'Skipped', failed: 'Failed', undone: 'Undone',
@@ -192,6 +196,8 @@ export default function App() {
   const [excludedDraft, setExcludedDraft] = useState('');
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
   const [updateModal, setUpdateModal] = useState(false);
+  const [updateDialogState, setUpdateDialogState] = useState<UpdateDialogState>('idle');
+  const [updateError, setUpdateError] = useState('');
   const [updateProgress, setUpdateProgress] = useState('');
   const t = labels[lang];
 
@@ -487,19 +493,34 @@ export default function App() {
   }
 
   async function checkForUpdate(manual: boolean) {
-    if (manual) setBusy(true);
-    if (manual) setNotice(t.updateLoading);
+    if (manual) {
+      setBusy(true);
+      setNotice(t.updateLoading);
+      setUpdateProgress('');
+      setUpdateError('');
+      setUpdateDialogState('loading');
+      setUpdateModal(true);
+    }
     try {
-      const available = await check();
+      const available = await check({
+        headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+        timeout: 15_000,
+      });
       setPendingUpdate(available);
       if (available) {
         setNotice(t.updateAvailable);
-        if (shouldOpenUpdateModal(manual, Boolean(available))) setUpdateModal(true);
+        if (shouldOpenUpdateModal(manual, Boolean(available))) setUpdateDialogState('available');
       } else if (manual) {
         setNotice(t.latest);
+        setUpdateDialogState('latest');
       }
     } catch (error) {
-      if (manual) setNotice(String(error));
+      if (manual) {
+        const message = String(error);
+        setUpdateError(message);
+        setNotice(message);
+        setUpdateDialogState('error');
+      }
     } finally {
       if (manual) setBusy(false);
     }
@@ -512,10 +533,21 @@ export default function App() {
     try {
       await pendingUpdate.downloadAndInstall(undefined, { restartAfterInstall: true });
     } catch (error) {
+      const message = String(error);
       setUpdateProgress('');
-      setNotice(String(error));
+      setUpdateError(message);
+      setNotice(message);
+      setUpdateDialogState('error');
       setBusy(false);
     }
+  }
+
+  function dismissUpdateModal() {
+    if (busy) return;
+    setUpdateModal(false);
+    setUpdateDialogState('idle');
+    setUpdateProgress('');
+    setUpdateError('');
   }
 
   useEffect(() => {
@@ -609,10 +641,13 @@ export default function App() {
 
   return (
     <main>
-      <header>
+      <header className="top-nav">
         <div className="brand">
-          <Files size={29} />
-          <div><h1>FileMoa</h1><p>{lang === 'ko' ? '안전하게 정리하고, 언제든 되돌리세요' : 'Organize safely. Undo anytime.'}</p></div>
+          <Files size={25} />
+          <div>
+            <div className="brand-line"><h1>FileMoa</h1><span className="app-version">v{APP_VERSION}</span></div>
+            <p>{lang === 'ko' ? '안전하게 정리하고, 언제든 되돌리세요' : 'Organize safely. Undo anytime.'}</p>
+          </div>
         </div>
         <button className="settings" onClick={() => setSettings((value) => !value)} aria-label={t.settings}>
           <Settings size={20} />{pendingUpdate && <span className="update-dot" />}
@@ -722,7 +757,12 @@ export default function App() {
 
       {undoPreview && <div className="modal-backdrop" role="presentation"><div className="update-modal undo-modal" role="dialog" aria-modal="true" aria-labelledby="undo-title"><button className="modal-close" onClick={() => setUndoPreview(null)} disabled={busy} aria-label={t.cancel}><X size={18} /></button><Undo2 size={30} className="modal-icon" /><h2 id="undo-title">{t.undoPreview}</h2><p>{lang === 'ko' ? '실행된 파일만 원래 위치로 복원합니다. 원래 위치에 새 파일이 있으면 덮어쓰지 않고 충돌로 기록합니다.' : 'Only files from this run are restored. A newer file at the original path is never overwritten and is reported as a conflict.'}</p><div className="release-notes undo-list">{undoPreview.actions.filter((action) => action.status === 'executed').slice(0, 100).map((action, index) => <div key={`${action.sourcePath}-${index}`}>{action.destinationPath} → {action.sourcePath}</div>)}</div><div className="modal-actions"><button className="primary-action" onClick={() => void undo(undoPreview)} disabled={busy}><Undo2 size={16} /> {t.undoConfirm}</button><button className="secondary-action" onClick={() => setUndoPreview(null)} disabled={busy}><X size={16} /> {t.cancel}</button></div></div></div>}
 
-      {updateModal && pendingUpdate && <div className="modal-backdrop" role="presentation"><div className="update-modal" role="dialog" aria-modal="true" aria-labelledby="update-title"><button className="modal-close" onClick={() => setUpdateModal(false)} disabled={busy} aria-label={t.installLater}><X size={18} /></button><Download size={30} className="modal-icon" /><h2 id="update-title">{t.updateTitle}</h2><div className="version-line"><span>{t.currentVersion}: {pendingUpdate.currentVersion}</span><span>→</span><strong>{t.newVersion}: {pendingUpdate.version}</strong></div>{pendingUpdate.date && <p className="muted">{pendingUpdate.date}</p>}<div className="release-notes">{pendingUpdate.body || (lang === 'ko' ? '릴리즈 노트가 제공되지 않았습니다.' : 'No release notes were provided.')}</div>{updateProgress && <p className="update-progress"><RefreshCw size={15} /> {updateProgress}</p>}<div className="modal-actions"><button className="primary-action" onClick={() => void installUpdate()} disabled={busy}><Download size={16} /> {t.installNow}</button><button className="secondary-action" onClick={() => setUpdateModal(false)} disabled={busy}><Clock3 size={16} /> {t.installLater}</button></div></div></div>}
+      {updateModal && updateDialogState !== 'idle' && <div className="modal-backdrop" role="presentation"><div className="update-modal" role="dialog" aria-modal="true" aria-labelledby="update-title"><button className="modal-close" onClick={dismissUpdateModal} disabled={busy} aria-label={t.close}><X size={18} /></button><Download size={30} className="modal-icon" /><h2 id="update-title">{t.updateTitle}</h2>
+        {updateDialogState === 'loading' && <div className="update-state update-state-loading"><RefreshCw size={20} className="spin" /><p>{t.updateLoading}</p></div>}
+        {updateDialogState === 'available' && pendingUpdate && <><div className="version-line"><span>{t.currentVersion}: {pendingUpdate.currentVersion}</span><span>→</span><strong>{t.newVersion}: {pendingUpdate.version}</strong></div>{pendingUpdate.date && <p className="muted">{pendingUpdate.date}</p>}<div className="release-notes">{pendingUpdate.body || (lang === 'ko' ? '릴리즈 노트가 제공되지 않았습니다.' : 'No release notes were provided.')}</div>{updateProgress && <p className="update-progress"><RefreshCw size={15} /> {updateProgress}</p>}<div className="modal-actions"><button className="primary-action" onClick={() => void installUpdate()} disabled={busy}><Download size={16} /> {t.installNow}</button><button className="secondary-action" onClick={dismissUpdateModal} disabled={busy}><Clock3 size={16} /> {t.installLater}</button></div></>}
+        {updateDialogState === 'latest' && <><div className="version-line"><span>{t.currentVersion}: {APP_VERSION}</span><strong className="status-good">{t.latest}</strong></div><p>{t.latest}</p><div className="modal-actions"><button className="secondary-action" onClick={dismissUpdateModal}><X size={16} /> {t.close}</button><button className="primary-action" onClick={() => void checkForUpdate(true)} disabled={busy}><RefreshCw size={16} /> {t.retry}</button></div></>}
+        {updateDialogState === 'error' && <><div className="version-line"><span>{t.currentVersion}: {APP_VERSION}</span><strong className="status-error">{t.updateErrorTitle}</strong></div><p className="inline-message">{updateError || t.updateErrorFallback}</p><div className="modal-actions"><button className="secondary-action" onClick={dismissUpdateModal}><X size={16} /> {t.close}</button><button className="primary-action" onClick={() => void checkForUpdate(true)} disabled={busy}><RefreshCw size={16} /> {t.retry}</button></div></>}
+      </div></div>}
     </main>
   );
 }
