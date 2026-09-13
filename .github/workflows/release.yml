@@ -2,6 +2,7 @@ name: Release FileMoa
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -22,14 +23,35 @@ jobs:
       # pinned until the Tauri patcher supports that toolchain reliably.
       - uses: dtolnay/rust-toolchain@1.94.1
       - run: npm ci
+      - name: Verify synchronized app version
+        shell: pwsh
+        run: |
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargoVersion = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches.Groups[1].Value
+          $versions = @($packageVersion, $tauriVersion, $cargoVersion) | Select-Object -Unique
+          if ($versions.Count -ne 1) {
+            throw "Version mismatch: package.json=$packageVersion, tauri.conf.json=$tauriVersion, Cargo.toml=$cargoVersion"
+          }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$packageVersion") {
+            throw "Tag $env:GITHUB_REF_NAME does not match the app version v$packageVersion"
+          }
+          Write-Host "Building FileMoa v$packageVersion"
+      - name: Run frontend tests
+        run: npm test -- --run
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "FileMoa ${{ github.ref_name }}"
+          # The action substitutes __VERSION__ from tauri.conf.json. This
+          # keeps branch pushes idempotent and creates a new release whenever
+          # the app version is deliberately bumped in the three manifests.
+          tagName: v__VERSION__
+          releaseName: "FileMoa v__VERSION__"
           releaseBody: "FileMoa automatic update release."
           releaseDraft: false
           prerelease: false

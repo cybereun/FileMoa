@@ -73,8 +73,12 @@ NSIS 실행 파일 패치 단계에서 최신 툴체인과의 호환 문제가 �
 
 ## GitHub Releases 자동 업데이트
 
-`.github/workflows/release.yml`은 `v*` 태그가 올라올 때만 Windows NSIS와 Tauri
-업데이트 서명 아티팩트를 만듭니다. 업로더는 다음 비밀을 필요로 합니다.
+`.github/workflows/release.yml`은 `main`에 커밋이 푸시되거나 `v*` 태그가 올라오면
+Windows NSIS와 Tauri 업데이트 서명 아티팩트를 빌드해 버전별 GitHub Release에
+자동 업로드합니다. `package.json`, `src-tauri/tauri.conf.json`,
+`src-tauri/Cargo.toml`의 버전이 일치해야 하며, 버전을 올리면 새 릴리즈가 생성되고
+같은 버전의 추가 푸시는 해당 릴리즈 아티팩트를 갱신합니다. 업로더는 다음 비밀을
+필요로 합니다.
 
 - `TAURI_SIGNING_PRIVATE_KEY`
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (키에 비밀번호를 설정한 경우)
