@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { check, type Update } from '@tauri-apps/plugin-updater';
@@ -87,6 +87,7 @@ type AiResult = {
 };
 type Tab = 'organize' | 'manage' | 'safety';
 type Panel = 'plan' | 'categories' | 'duplicates' | 'history' | 'large' | 'empty' | 'ai';
+type ScanPanel = 'duplicates' | 'large' | 'empty' | null;
 type UpdateDialogState = 'idle' | 'loading' | 'available' | 'latest' | 'error';
 
 const APP_VERSION = packageJson.version;
@@ -98,7 +99,7 @@ const labels = {
     undo: '마지막 정리 되돌리기', history: '정리 기록', aiSettings: 'AI 설정', sub: '하위 폴더 포함',
     empty: '정리할 폴더를 선택하세요', nothing: '표시할 항목이 없습니다.', update: '업데이트 확인', language: 'English',
     catTitle: '사용자 정의 카테고리', catHint: '이름과 확장자를 입력하세요. 예: 영수증 / pdf,xlsx', add: '카테고리 추가',
-    scan: '중복 탐색 실행', large: '대용량 파일', emptyFolders: '빈 폴더', plan: '정리 예정', aiClassify: 'AI 분류', aiTitle: 'AI 파일 분류 설정', aiResults: 'AI 분류 결과',
+    scan: '중복 탐색 실행', scanning: '검색 중…', large: '대용량 파일', emptyFolders: '빈 폴더', plan: '정리 예정', aiClassify: 'AI 분류', aiTitle: 'AI 파일 분류 설정', aiResults: 'AI 분류 결과',
     aiHint: 'AI는 사용자가 버튼을 눌렀을 때만 파일명·메타데이터를 전송합니다. 파일 내용과 경로는 전송하지 않습니다.',
     selected: '이번 분류에 사용할 공급자', save: '설정 저장', test: '연결 테스트', removeKey: '저장된 키 삭제',
     apiKey: 'API 키', model: '모델 ID', modelHint: '권장값이 기본으로 입력됩니다. 필요하면 직접 변경할 수 있습니다.',
@@ -118,7 +119,7 @@ const labels = {
     undo: 'Undo last run', history: 'Run history', aiSettings: 'AI settings', sub: 'Include subfolders',
     empty: 'Choose a folder to organize', nothing: 'Nothing to show yet.', update: 'Check updates', language: '한국어',
     catTitle: 'Custom categories', catHint: 'Enter a name and extensions. Example: Receipts / pdf,xlsx', add: 'Add category',
-    scan: 'Scan duplicates', large: 'Large files', emptyFolders: 'Empty folders', plan: 'Planned changes', aiClassify: 'AI classify', aiTitle: 'AI file classification settings', aiResults: 'AI suggestions',
+    scan: 'Scan duplicates', scanning: 'Scanning…', large: 'Large files', emptyFolders: 'Empty folders', plan: 'Planned changes', aiClassify: 'AI classify', aiTitle: 'AI file classification settings', aiResults: 'AI suggestions',
     aiHint: 'AI sends filenames and metadata only when you press the button. File contents and paths are never sent.',
     selected: 'Provider for the next classification', save: 'Save settings', test: 'Test connection', removeKey: 'Remove saved key',
     apiKey: 'API key', model: 'Model ID', modelHint: 'A recommended value is provided and can be edited in advanced settings.',
@@ -172,6 +173,8 @@ export default function App() {
   const [largeFiles, setLargeFiles] = useState<LargeFile[]>([]);
   const [emptyFolders, setEmptyFolders] = useState<string[]>([]);
   const [cleanupSelection, setCleanupSelection] = useState<string[]>([]);
+  const [scanPanel, setScanPanel] = useState<ScanPanel>(null);
+  const scanRequestRef = useRef(0);
   const [knownFolders, setKnownFolders] = useState<KnownFolder[]>([]);
   const [basis, setBasis] = useState(() => localStorage.getItem('filemoa-basis') || 'type');
   const [mode, setMode] = useState(() => localStorage.getItem('filemoa-mode') || 'safe');
@@ -220,6 +223,15 @@ export default function App() {
     setPath(folder.path);
     setPlan(null);
     setPanel('plan');
+  }
+
+  function selectTab(nextTab: Tab) {
+    if (scanPanel) setBusy(false);
+    scanRequestRef.current += 1;
+    setScanPanel(null);
+    setTab(nextTab);
+    setNotice('');
+    setPanel(nextTab === 'organize' ? 'plan' : nextTab === 'manage' ? 'categories' : 'history');
   }
 
   function knownFolderLabel(id: string) {
@@ -303,47 +315,71 @@ export default function App() {
 
   async function scanDuplicates() {
     if (!path) return;
+    const requestId = ++scanRequestRef.current;
+    const roots = paths.length ? paths : [path];
+    setPanel('duplicates');
+    setScanPanel('duplicates');
+    setDuplicates([]);
+    setDuplicateSelection([]);
+    setNotice('');
     setBusy(true);
     try {
-      const roots = paths.length ? paths : [path];
-      setDuplicates((await Promise.all(roots.map((rootPath) => invoke<Duplicate[]>('find_duplicates', { rootPath, includeSubfolders: sub })))).flat());
-      setDuplicateSelection([]);
-      setPanel('duplicates');
+      const results = (await Promise.all(roots.map((rootPath) => invoke<Duplicate[]>('find_duplicates', { rootPath, includeSubfolders: sub })))).flat();
+      if (requestId === scanRequestRef.current) setDuplicates(results);
     } catch (error) {
-      setNotice(String(error));
+      if (requestId === scanRequestRef.current) setNotice(String(error));
     } finally {
-      setBusy(false);
+      if (requestId === scanRequestRef.current) {
+        setScanPanel(null);
+        setBusy(false);
+      }
     }
   }
 
   async function scanLargeFiles() {
     if (!path) return;
+    const requestId = ++scanRequestRef.current;
+    const roots = paths.length ? paths : [path];
+    setPanel('large');
+    setScanPanel('large');
+    setLargeFiles([]);
+    setCleanupSelection([]);
+    setNotice('');
     setBusy(true);
     try {
-      const roots = paths.length ? paths : [path];
       const threshold = Math.max(1, Number(largeThresholdMb) || 100) * 1024 * 1024;
-      setLargeFiles((await Promise.all(roots.map((rootPath) => invoke<LargeFile[]>('find_large_files', { rootPath, includeSubfolders: sub, minimumSizeBytes: threshold })))).flat());
-      setCleanupSelection([]);
-      setPanel('large');
+      const results = (await Promise.all(roots.map((rootPath) => invoke<LargeFile[]>('find_large_files', { rootPath, includeSubfolders: sub, minimumSizeBytes: threshold })))).flat();
+      if (requestId === scanRequestRef.current) setLargeFiles(results);
     } catch (error) {
-      setNotice(String(error));
+      if (requestId === scanRequestRef.current) setNotice(String(error));
     } finally {
-      setBusy(false);
+      if (requestId === scanRequestRef.current) {
+        setScanPanel(null);
+        setBusy(false);
+      }
     }
   }
 
   async function scanEmptyFolders() {
     if (!path) return;
+    const requestId = ++scanRequestRef.current;
+    const roots = paths.length ? paths : [path];
+    setPanel('empty');
+    setScanPanel('empty');
+    setEmptyFolders([]);
+    setCleanupSelection([]);
+    setNotice('');
     setBusy(true);
     try {
-      const roots = paths.length ? paths : [path];
-      setEmptyFolders((await Promise.all(roots.map((rootPath) => invoke<string[]>('find_empty_folders', { rootPath, includeSubfolders: sub })))).flat());
-      setCleanupSelection([]);
-      setPanel('empty');
+      const results = (await Promise.all(roots.map((rootPath) => invoke<string[]>('find_empty_folders', { rootPath, includeSubfolders: sub })))).flat();
+      if (requestId === scanRequestRef.current) setEmptyFolders(results);
     } catch (error) {
-      setNotice(String(error));
+      if (requestId === scanRequestRef.current) setNotice(String(error));
     } finally {
-      setBusy(false);
+      if (requestId === scanRequestRef.current) {
+        setScanPanel(null);
+        setBusy(false);
+      }
     }
   }
 
@@ -659,7 +695,7 @@ export default function App() {
       </header>
 
       <nav className="tabs">
-        {(['organize', 'manage', 'safety'] as Tab[]).map((item) => <button className={tab === item ? 'active' : ''} onClick={() => setTab(item)} key={item}>{t[item]}</button>)}
+        {(['organize', 'manage', 'safety'] as Tab[]).map((item) => <button className={tab === item ? 'active' : ''} onClick={() => selectTab(item)} key={item}>{t[item]}</button>)}
       </nav>
 
       <section className="ribbon">
@@ -712,17 +748,17 @@ export default function App() {
 
         {panel === 'duplicates' && <>
           <h2>{t.duplicates}</h2><p>{lang === 'ko' ? '완전히 동일한 파일만 표시합니다. 선택한 파일은 확인 후 휴지통으로 보낼 수 있습니다.' : 'Only byte-identical files are shown. Selected files can be moved to the Recycle Bin after confirmation.'}</p>
-          {duplicates.length ? <>{duplicates.map((group, index) => <div className="card" key={`${group.hash}-${index}`}><b>{group.filePaths.length} files · {(group.reclaimableBytes / 1024 / 1024).toFixed(1)} MB</b><span className="muted">SHA-256: {group.hash}</span>{group.filePaths.map((filePath, fileIndex) => <label className="check-row" key={filePath}><input type="checkbox" checked={duplicateSelection.includes(filePath)} onChange={() => setDuplicateSelection((previous) => previous.includes(filePath) ? previous.filter((item) => item !== filePath) : [...previous, filePath])} />{fileIndex === 0 ? (lang === 'ko' ? '보존 권장: ' : 'Keep recommended: ') : ''}{filePath}</label>)}</div>)}<button className="secondary-action" onClick={() => void recycleSelected(duplicateSelection)} disabled={busy || !duplicateSelection.length}><Trash2 size={15} /> {t.recycle} ({duplicateSelection.length})</button></> : <Empty text={t.nothing} />}
+          {scanPanel === 'duplicates' ? <Loading text={t.scanning} /> : duplicates.length ? <>{duplicates.map((group, index) => <div className="card" key={`${group.hash}-${index}`}><b>{group.filePaths.length} files · {(group.reclaimableBytes / 1024 / 1024).toFixed(1)} MB</b><span className="muted">SHA-256: {group.hash}</span>{group.filePaths.map((filePath, fileIndex) => <label className="check-row" key={filePath}><input type="checkbox" checked={duplicateSelection.includes(filePath)} onChange={() => setDuplicateSelection((previous) => previous.includes(filePath) ? previous.filter((item) => item !== filePath) : [...previous, filePath])} />{fileIndex === 0 ? (lang === 'ko' ? '보존 권장: ' : 'Keep recommended: ') : ''}{filePath}</label>)}</div>)}<button className="secondary-action" onClick={() => void recycleSelected(duplicateSelection)} disabled={busy || !duplicateSelection.length}><Trash2 size={15} /> {t.recycle} ({duplicateSelection.length})</button></> : <Empty text={t.nothing} />}
         </>}
 
         {panel === 'large' && <>
           <h2>{t.large}</h2><p>{t.largeHint}</p><label className="threshold-field">{t.largeThreshold}<input type="number" min="1" step="1" value={largeThresholdMb} onChange={(event) => setLargeThresholdMb(event.target.value)} /></label>
-          {largeFiles.length ? <div className="card-list">{largeFiles.map((file) => <div className="card compact-card" key={file.path}><b>{formatBytes(file.sizeBytes)}</b><span>{file.path}</span></div>)}</div> : <Empty text={t.nothing} />}
+          {scanPanel === 'large' ? <Loading text={t.scanning} /> : largeFiles.length ? <div className="card-list">{largeFiles.map((file) => <div className="card compact-card" key={file.path}><b>{formatBytes(file.sizeBytes)}</b><span>{file.path}</span></div>)}</div> : <Empty text={t.nothing} />}
         </>}
 
         {panel === 'empty' && <>
           <h2>{t.emptyFolders}</h2><p>{t.emptyHint}</p>
-          {emptyFolders.length ? <><div className="card-list">{emptyFolders.map((folder) => <label className="check-row card" key={folder}><input type="checkbox" checked={cleanupSelection.includes(folder)} onChange={() => setCleanupSelection((previous) => previous.includes(folder) ? previous.filter((item) => item !== folder) : [...previous, folder])} />{folder}</label>)}</div><button className="secondary-action" onClick={() => void recycleSelected(cleanupSelection)} disabled={busy || !cleanupSelection.length}><Trash2 size={15} /> {t.recycle} ({cleanupSelection.length})</button></> : <Empty text={t.nothing} />}
+          {scanPanel === 'empty' ? <Loading text={t.scanning} /> : emptyFolders.length ? <><div className="card-list">{emptyFolders.map((folder) => <label className="check-row card" key={folder}><input type="checkbox" checked={cleanupSelection.includes(folder)} onChange={() => setCleanupSelection((previous) => previous.includes(folder) ? previous.filter((item) => item !== folder) : [...previous, folder])} />{folder}</label>)}</div><button className="secondary-action" onClick={() => void recycleSelected(cleanupSelection)} disabled={busy || !cleanupSelection.length}><Trash2 size={15} /> {t.recycle} ({cleanupSelection.length})</button></> : <Empty text={t.nothing} />}
         </>}
 
         {panel === 'history' && <>
@@ -769,4 +805,8 @@ export default function App() {
 
 function Empty({ text }: { text: string }) {
   return <div className="empty"><FolderTree size={36} /><p>{text}</p></div>;
+}
+
+function Loading({ text }: { text: string }) {
+  return <div className="empty"><RefreshCw size={36} className="spin" /><p>{text}</p></div>;
 }

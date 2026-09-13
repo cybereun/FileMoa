@@ -892,7 +892,9 @@ pub fn undo_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String>
 fn hash_file(path: &Path) -> io::Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    // Tauri IPC workers use relatively small stacks on Windows. Keep the
+    // streaming buffer on the heap so a duplicate scan cannot overflow one.
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let read = file.read(&mut buffer)?;
         if read == 0 {
@@ -913,6 +915,11 @@ fn scan_entries(root: &str, sub: bool) -> impl Iterator<Item = Result<DirEntry, 
 }
 
 pub fn find_duplicates(root: &str, sub: bool) -> Result<Vec<DuplicateGroup>, String> {
+    if !Path::new(root).is_dir() {
+        return Err(format!(
+            "중복 파일을 찾을 폴더를 찾을 수 없습니다 / duplicate scan folder not found: {root}"
+        ));
+    }
     let mut sizes: HashMap<u64, Vec<PathBuf>> = HashMap::new();
     for item in scan_entries(root, sub) {
         let entry = match item {
@@ -1102,6 +1109,22 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].file_paths.len(), 2);
         assert_eq!(groups[0].hash.len(), 64);
+    }
+
+    #[test]
+    fn duplicate_hashing_keeps_worker_stack_usage_bounded() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("large.bin");
+        fs::write(&path, vec![7_u8; 2 * 1024 * 1024]).expect("large file");
+        let handle = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(move || hash_file(&path))
+            .expect("worker thread");
+        let hash = handle
+            .join()
+            .expect("worker should not overflow its stack")
+            .expect("hash");
+        assert_eq!(hash.len(), 64);
     }
 
     #[test]
