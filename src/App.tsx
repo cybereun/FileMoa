@@ -24,7 +24,7 @@ import {
   X,
 } from 'lucide-react';
 import './styles.css';
-import { basename, formatBytes, providerStatus, requestCount, shouldOpenUpdateModal } from './utils';
+import { basename, formatBytes, providerStatus, requestCount, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
 
 type Category = { name: string; extensions: string[]; enabled: boolean };
 type KeywordRule = { keyword: string; category: string; caseSensitive?: boolean };
@@ -521,6 +521,15 @@ export default function App() {
   useEffect(() => {
     void refreshAiProviders();
     void invoke<KnownFolder[]>('known_folders').then(setKnownFolders).catch(() => undefined);
+    void invoke<string | null>('startup_path')
+      .then((initialPath) => {
+        if (shouldUseStartupPath(initialPath)) {
+          setPaths([initialPath]);
+          setPath(initialPath);
+          setPanel('plan');
+        }
+      })
+      .catch((error) => setNotice(String(error)));
     // Startup checks are silent: they only set the update badge/notice.
     void checkForUpdate(false);
   }, []);

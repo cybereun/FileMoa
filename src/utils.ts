@@ -30,3 +30,7 @@ export function providerStatus(providerId: string, keyPresent: boolean, availabl
 export function shouldOpenUpdateModal(manualCheck: boolean, updateAvailable: boolean): boolean {
   return manualCheck && updateAvailable;
 }
+
+export function shouldUseStartupPath(path: string | null | undefined): path is string {
+  return typeof path === 'string' && path.trim().length > 0;
+}

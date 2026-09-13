@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { basename, formatBytes, providerStatus, requestCount, shouldOpenUpdateModal } from './utils';
+import { basename, formatBytes, providerStatus, requestCount, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
 
 describe('FileMoa UI utilities', () => {
   it('formats byte counts for the large-file view', () => {
@@ -29,5 +29,11 @@ describe('FileMoa UI utilities', () => {
     expect(shouldOpenUpdateModal(false, true)).toBe(false);
     expect(shouldOpenUpdateModal(true, false)).toBe(false);
     expect(shouldOpenUpdateModal(true, true)).toBe(true);
+  });
+
+  it('accepts only a non-empty shell startup path', () => {
+    expect(shouldUseStartupPath(String.raw`C:\Work\Files`)).toBe(true);
+    expect(shouldUseStartupPath('   ')).toBe(false);
+    expect(shouldUseStartupPath(null)).toBe(false);
   });
 });

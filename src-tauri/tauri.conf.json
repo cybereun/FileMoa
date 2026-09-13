@@ -1,10 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "FileMoa",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "identifier": "com.cybereun.filemoa",
   "build": { "frontendDist": "../dist", "devUrl": "http://localhost:1420", "beforeDevCommand": "npm run dev", "beforeBuildCommand": "npm run build" },
   "app": { "windows": [{ "title": "FileMoa", "width": 1200, "height": 780, "minWidth": 940, "minHeight": 620 }], "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:" } },
-  "bundle": { "active": true, "targets": ["nsis"], "icon": ["../assets/icon/smartfile-icon.png"], "createUpdaterArtifacts": true, "windows": { "nsis": { "installMode": "currentUser", "displayLanguageSelector": true } } },
+  "bundle": { "active": true, "targets": ["nsis"], "icon": ["../assets/icon/smartfile-icon.png"], "createUpdaterArtifacts": true, "windows": { "nsis": { "installMode": "currentUser", "displayLanguageSelector": true, "installerHooks": "nsis/hooks.nsh" } } },
   "plugins": { "updater": { "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ3MTMwQzIzRTM1QTdFOEYKUldTUGZscmpJd3dUUjNjUHVETHZHLzFDREVxNEFtOHBiOXFpd2ljcG5VM1NWVFBNTjNzZ0c0YS8K", "endpoints": ["https://github.com/cybereun/FileMoa/releases/latest/download/latest.json"], "windows": { "installMode": "passive" } } }
 }

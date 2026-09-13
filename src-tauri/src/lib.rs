@@ -4,6 +4,7 @@ mod recycle;
 
 use planner::{create_plan, OrganizationPlan, PlanRequest};
 use serde::Serialize;
+use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Clone, Serialize)]
@@ -33,6 +34,46 @@ fn known_folders(app: AppHandle) -> Vec<KnownFolder> {
             })
         })
         .collect()
+}
+
+fn startup_candidate<I>(mut arguments: I) -> Result<Option<PathBuf>, String>
+where
+    I: Iterator<Item = std::ffi::OsString>,
+{
+    while let Some(argument) = arguments.next() {
+        if !argument
+            .to_string_lossy()
+            .eq_ignore_ascii_case("--organize")
+        {
+            continue;
+        }
+        let Some(candidate) = arguments.next() else {
+            return Err(
+                "FileMoa 셸 실행 인자에 폴더 경로가 없습니다. / The shell launch did not include a folder path."
+                    .into(),
+            );
+        };
+        return Ok(Some(PathBuf::from(candidate)));
+    }
+    Ok(None)
+}
+
+/// Return the single folder passed by an Explorer/Desktop shell verb. The
+/// explicit marker prevents unrelated runtime arguments from being treated as
+/// a folder, and invalid paths fail before the planner can perform any work.
+#[tauri::command]
+fn startup_path() -> Result<Option<String>, String> {
+    let Some(path) = startup_candidate(std::env::args_os().skip(1))? else {
+        return Ok(None);
+    };
+    if !path.is_dir() {
+        return Err(format!(
+            "셸에서 전달된 폴더를 찾을 수 없습니다: {} / The shell folder is not available: {}",
+            path.display(),
+            path.display()
+        ));
+    }
+    Ok(Some(path.display().to_string()))
 }
 
 #[tauri::command]
@@ -90,6 +131,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             known_folders,
+            startup_path,
             plan_organization,
             plan_multiple_organizations,
             execute_organization,
@@ -108,4 +150,30 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running FileMoa");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::startup_candidate;
+    use std::ffi::OsString;
+
+    #[test]
+    fn shell_parser_requires_explicit_marker() {
+        let args = vec![OsString::from(r"C:\not-a-folder")].into_iter();
+        assert!(startup_candidate(args).expect("parse").is_none());
+    }
+
+    #[test]
+    fn shell_parser_preserves_unicode_and_spaces() {
+        let expected = r"C:\Users\demo\바탕 화면\작업 폴더";
+        let args = vec![OsString::from("--organize"), OsString::from(expected)].into_iter();
+        let actual = startup_candidate(args).expect("parse").expect("path");
+        assert_eq!(actual.to_string_lossy(), expected);
+    }
+
+    #[test]
+    fn shell_parser_rejects_missing_path_argument() {
+        let args = vec![OsString::from("--organize")].into_iter();
+        assert!(startup_candidate(args).is_err());
+    }
 }
