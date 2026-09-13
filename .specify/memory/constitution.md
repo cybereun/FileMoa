@@ -23,6 +23,7 @@ FileMoa MUST exclude protected Windows locations, application-data areas, detect
 development projects, configured exclusions, locked paths, and sensitive file
 patterns from automatic changes. It MUST report exclusions and failures without
 silently bypassing them. This prevents system damage and broken source trees.
+AI suggestions remain advisory and cannot bypass the same boundaries.
 
 ### III. Deterministic, Explainable Organization
 Every planned file action MUST state its source, destination, matched rule, and
@@ -34,8 +35,10 @@ and reproduce each result.
 ### IV. Local-First Privacy and Resilience
 File analysis, organization plans, history, preferences, and Undo data MUST remain
 on the local computer for v1. The application MUST work offline except for an
-explicitly user-initiated update check. This avoids uploading personal file names,
-paths, or content and keeps core work dependable.
+explicitly user-initiated update check or an explicit AI classification action.
+External AI requests may contain only the approved basename and file metadata;
+file contents and full paths are never sent. This keeps core work dependable and
+protects personal data.
 
 ### V. Testable Quality and Reversible Releases
 Core classification, safety checks, collision naming, plan generation, execution,

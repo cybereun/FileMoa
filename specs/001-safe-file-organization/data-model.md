@@ -14,12 +14,14 @@
 ## PlannedAction
 
 Source path, collision-resolved destination path, matching rule, status, explanation,
-and collision index. Status is proposed, excluded, skipped, failed, executed, or undone.
+byte size, modified timestamp, and collision flag. Status is proposed, skipped, failed,
+executed, undone, or an explicit Undo conflict/missing result.
 
 ## OrganizationPlan
 
-Local identifier, selected root, subfolder choice, creation time, actions, exclusions,
-and analysis errors. It is immutable after approval.
+Selected root(s), scan mode, language, creation time, actions, exclusions, and analysis
+errors. A multi-root plan keeps each action inside its originating root. It is immutable
+after approval.
 
 ## OrganizationRun
 
@@ -32,8 +34,13 @@ User-owned `OrganizationRule` with local display order and mutable enablement.
 
 ## DuplicateGroup
 
-Full SHA-256, common byte size, member file paths, and reclaimable bytes. No automatic
-deletion action exists in v1.
+Full SHA-256, common byte size, member file paths, and reclaimable bytes. Removal is an
+explicit, confirmed Recycle Bin operation; permanent deletion is never used.
+
+## AnalysisCandidate
+
+Large files and empty folders are read-only candidates. They are never changed until
+the user selects and confirms a Recycle Bin action.
 
 ## State Transitions
 
