@@ -55,3 +55,24 @@ jobs:
           releaseBody: "FileMoa automatic update release."
           releaseDraft: false
           prerelease: false
+      - name: Build portable executable
+        run: npm run tauri build -- --no-bundle
+      - name: Prepare portable release asset
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $source = "src-tauri/target/release/filemoa.exe"
+          $target = "src-tauri/target/release/FileMoa_${version}_portable.exe"
+          if (-not (Test-Path -LiteralPath $source)) {
+            throw "Portable executable was not produced: $source"
+          }
+          Copy-Item -LiteralPath $source -Destination $target -Force
+          Write-Host "Prepared $target"
+      - name: Upload portable executable
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $asset = "src-tauri/target/release/FileMoa_${version}_portable.exe"
+          gh release upload "v$version" $asset --clobber
