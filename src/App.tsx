@@ -5,24 +5,39 @@ import { check, type Update } from '@tauri-apps/plugin-updater';
 import packageJson from '../package.json';
 import {
   Bot,
+  CalendarDays,
   CheckCircle2,
   Clock3,
   Copy,
   Download,
+  Eye,
+  EyeOff,
   ExternalLink,
   Files,
+  FileText,
+  Film,
   FolderOpen,
   FolderTree,
+  Folders,
   History,
+  Image as ImageIcon,
+  Layers,
+  ListFilter,
+  Monitor,
+  Music,
   Play,
   RefreshCw,
   Search,
   Settings,
+  Shield,
+  ShieldAlert,
   ShieldCheck,
+  SlidersHorizontal,
   Tags,
   Trash2,
   Undo2,
   X,
+  type LucideIcon,
 } from 'lucide-react';
 import './styles.css';
 import { basename, cloudOnlyNotice as cloudOnlyMessage, formatBytes, isCancelledError, progressPercent, providerStatus, requestCount, runTitle as runTitleText, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
@@ -843,7 +858,10 @@ export default function App() {
       </header>
 
       <nav className="tabs">
-        {(['organize', 'manage', 'safety'] as Tab[]).map((item) => <button className={tab === item ? 'active' : ''} onClick={() => selectTab(item)} key={item}>{t[item]}</button>)}
+        {(['organize', 'manage', 'safety'] as Tab[]).map((item) => {
+          const TabIcon = TAB_ICONS[item];
+          return <button className={tab === item ? 'active' : ''} onClick={() => selectTab(item)} key={item} aria-current={tab === item ? 'page' : undefined}><TabIcon size={17} aria-hidden="true" />{t[item]}</button>;
+        })}
       </nav>
 
       <section className="ribbon">
@@ -852,17 +870,17 @@ export default function App() {
             {ribbon.map(({ key, icon: Icon, action, disabled }) => <button key={key} onClick={() => void action()} disabled={busy || disabled}><Icon size={22} /><span>{t[key as keyof typeof t]}</span></button>)}
           </div>
           {tab === 'organize' && <div className="ribbon-controls">
-            <label className="ribbon-option"><input type="checkbox" checked={sub} onChange={(event) => setSub(event.target.checked)} />{t.sub}</label>
-            <label className="ribbon-option"><span>{t.basis}</span><select value={basis} onChange={(event) => setBasis(event.target.value)}><option value="type">{t.byType}</option><option value="date">{t.byDate}</option><option value="date_day">{t.byDateDay}</option><option value="year">{t.byYear}</option><option value="size">{t.bySize}</option><option value="name">{t.byName}</option></select></label>
-            {(basis === 'date' || basis === 'date_day' || basis === 'year') && <label className="ribbon-option"><span>{t.dateBasis}</span><select value={dateBasis} onChange={(event) => setDateBasis(event.target.value)}><option value="created">{t.byCreated}</option><option value="modified">{t.byModified}</option><option value="accessed">{t.byAccessed}</option></select></label>}
-            <label className="ribbon-option"><span>{t.mode}</span><select value={mode} onChange={(event) => setMode(event.target.value)}><option value="safe">{t.safeMode}</option><option value="normal">{t.normalMode}</option><option value="strong">{t.strongMode}</option></select></label>
-            <label className="ribbon-option"><input type="checkbox" checked={includeHidden} onChange={(event) => setIncludeHidden(event.target.checked)} />{t.includeHidden}</label>
-            <label className="ribbon-option"><input type="checkbox" checked={multiRoot} onChange={(event) => { setMultiRoot(event.target.checked); if (!event.target.checked && paths.length > 1) { setPaths(paths.slice(0, 1)); setPath(paths[0]); } }} />{t.multiRoot}</label>
+            <ToggleChip icon={Layers} checked={sub} onChange={setSub} label={t.sub} />
+            <label className="ribbon-option"><ListFilter size={16} aria-hidden="true" /><span>{t.basis}</span><select value={basis} onChange={(event) => setBasis(event.target.value)}><option value="type">{t.byType}</option><option value="date">{t.byDate}</option><option value="date_day">{t.byDateDay}</option><option value="year">{t.byYear}</option><option value="size">{t.bySize}</option><option value="name">{t.byName}</option></select></label>
+            {(basis === 'date' || basis === 'date_day' || basis === 'year') && <label className="ribbon-option"><CalendarDays size={16} aria-hidden="true" /><span>{t.dateBasis}</span><select value={dateBasis} onChange={(event) => setDateBasis(event.target.value)}><option value="created">{t.byCreated}</option><option value="modified">{t.byModified}</option><option value="accessed">{t.byAccessed}</option></select></label>}
+            <label className="ribbon-option">{mode === 'strong' ? <ShieldAlert size={16} aria-hidden="true" /> : mode === 'normal' ? <Shield size={16} aria-hidden="true" /> : <ShieldCheck size={16} aria-hidden="true" />}<span>{t.mode}</span><select value={mode} onChange={(event) => setMode(event.target.value)}><option value="safe">{t.safeMode}</option><option value="normal">{t.normalMode}</option><option value="strong">{t.strongMode}</option></select></label>
+            <ToggleChip icon={includeHidden ? Eye : EyeOff} checked={includeHidden} onChange={setIncludeHidden} label={t.includeHidden} />
+            <ToggleChip icon={Folders} checked={multiRoot} onChange={(next) => { setMultiRoot(next); if (!next && paths.length > 1) { setPaths(paths.slice(0, 1)); setPath(paths[0]); } }} label={t.multiRoot} />
           </div>}
         </div>
         {tab === 'organize' && knownFolders.length > 0 && <div className="quick-folders" aria-label={t.quickFolders}>
           <span className="quick-folders-label">{t.quickFolders}</span>
-          {knownFolders.map((folder) => <button className="quick-folder" key={folder.id} onClick={() => chooseKnownFolder(folder)} disabled={busy} title={folder.path}><FolderOpen size={15} />{knownFolderLabel(folder.id)}</button>)}
+          {knownFolders.map((folder) => <button className="quick-folder" key={folder.id} onClick={() => chooseKnownFolder(folder)} disabled={busy} title={folder.path}>{(() => { const FolderIcon = FOLDER_ICONS[folder.id] ?? FolderOpen; return <FolderIcon size={15} aria-hidden="true" />; })()}{knownFolderLabel(folder.id)}</button>)}
         </div>}
         <code className="ribbon-path" title={path || t.empty}>{path || t.empty}</code>
       </section>
@@ -954,6 +972,29 @@ export default function App() {
 
 function Empty({ text }: { text: string }) {
   return <div className="empty"><FolderTree size={36} /><p>{text}</p></div>;
+}
+
+const TAB_ICONS: Record<Tab, LucideIcon> = { organize: FolderTree, manage: SlidersHorizontal, safety: ShieldCheck };
+
+/** One icon per Windows known folder; anything unknown keeps the generic folder. */
+const FOLDER_ICONS: Record<string, LucideIcon> = {
+  desktop: Monitor,
+  downloads: Download,
+  documents: FileText,
+  pictures: ImageIcon,
+  videos: Film,
+  music: Music,
+};
+
+/** A checkbox shown as an icon chip. The real input stays in the page (visually hidden), so keyboard and screen readers work as before. */
+function ToggleChip({ icon: Icon, checked, onChange, label }: { icon: LucideIcon; checked: boolean; onChange: (next: boolean) => void; label: string }) {
+  return (
+    <label className={`toggle-chip ${checked ? 'on' : ''}`}>
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+      <Icon size={16} aria-hidden="true" />
+      <span>{label}</span>
+    </label>
+  );
 }
 
 function ProgressBar({ progress, lang, onCancel }: { progress: ProgressInfo; lang: 'ko' | 'en'; onCancel: () => void }) {

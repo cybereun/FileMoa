@@ -1246,3 +1246,76 @@ main {
 .progress-card progress { width: 100%; height: 8px; }
 .progress-current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.7; }
 .progress-card button { justify-self: end; }
+
+/* Icons in the ribbon: tabs, option chips and quick folders. */
+.tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tabs button svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.ribbon-option > svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.toggle-chip {
+  position: relative;
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 40px;
+  margin: 0;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-muted);
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.25;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle-chip > svg {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+/* The checkbox is hidden but still focusable and clickable through its label. */
+.toggle-chip input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.toggle-chip:hover {
+  border-color: var(--accent);
+}
+
+.toggle-chip.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.toggle-chip.on > svg {
+  color: var(--accent-strong);
+}
+
+.toggle-chip:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
