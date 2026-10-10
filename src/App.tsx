@@ -226,6 +226,8 @@ export default function App() {
   const [largeThresholdMb, setLargeThresholdMb] = useState(() => readLocalText('filemoa-large-threshold-mb') || '100');
   const [includeHidden, setIncludeHidden] = useState(false);
   const [undoPreview, setUndoPreview] = useState<Plan | null>(null);
+  // Rows of the run being undone that are ticked in the undo window.
+  const [undoRows, setUndoRows] = useState<Set<number>>(() => new Set());
   const [aiProviders, setAiProviders] = useState<AiProvider[]>([]);
   const [selectedAi, setSelectedAi] = useState('ollama');
   const [aiKeyDraft, setAiKeyDraft] = useState('');
@@ -402,7 +404,9 @@ export default function App() {
   async function openUndoPreview(runId = runs.find((run) => run.executedCount > 0)?.runId) {
     if (!runId) return;
     try {
-      setUndoPreview(await invoke<Plan>('load_run', { runId }));
+      const loaded = await invoke<Plan>('load_run', { runId });
+      setUndoRows(new Set(loaded.actions.flatMap((action, index) => (action.status === 'executed' ? [index] : []))));
+      setUndoPreview(loaded);
     } catch (error) {
       setNotice(String(error));
     }
@@ -410,15 +414,35 @@ export default function App() {
 
   async function undo(run = undoPreview) {
     if (!run) return;
-    const restoreCount = run.actions.filter((action) => action.status === 'executed').length;
+    const rows = [...undoRows].filter((row) => run.actions[row]?.status === 'executed');
+    const restoreCount = rows.length;
     if (!restoreCount || !confirm(lang === 'ko' ? `${restoreCount}개 파일을 원래 위치로 되돌릴까요? 기존 파일은 덮어쓰지 않습니다.` : `Restore ${restoreCount} files to their original locations? Existing files will never be overwritten.`)) return;
     setBusy(true);
     try {
-      const done = await invoke<Plan>('undo_organization', { runId: run.runId });
+      const done = await invoke<Plan>('undo_organization', { runId: run.runId, only: rows });
       void refreshRuns();
       setPlan(done);
       setUndoPreview(null);
-      setNotice(lang === 'ko' ? '마지막 정리를 되돌렸습니다.' : 'Last organization was undone.');
+      const remaining = done.actions.filter((action) => action.status === 'executed').length;
+      setNotice(remaining
+        ? (lang === 'ko' ? `${restoreCount}개를 되돌렸습니다. ${remaining}개는 이동된 상태로 남아 있고 정리 기록에서 다시 되돌릴 수 있습니다.` : `${restoreCount} restored. ${remaining} stay moved and can be undone later from the history.`)
+        : (lang === 'ko' ? '정리를 모두 되돌렸습니다.' : 'The organization was fully undone.'));
+    } catch (error) {
+      failure(error);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeRun(run: RunSummary) {
+    const warning = run.executedCount > 0
+      ? (lang === 'ko' ? `이 정리 기록을 삭제할까요?\n아직 이동된 파일 ${run.executedCount}개는 더 이상 되돌릴 수 없게 됩니다(파일 자체는 지워지지 않습니다).` : `Delete this history entry?\n The ${run.executedCount} files that are still moved can no longer be undone (the files themselves are not deleted).`)
+      : (lang === 'ko' ? '이 정리 기록을 삭제할까요?' : 'Delete this history entry?');
+    if (!confirm(warning)) return;
+    setBusy(true);
+    try {
+      await invoke('delete_run', { runId: run.runId });
+      await refreshRuns();
     } catch (error) {
       failure(error);
     } finally {
@@ -957,7 +981,7 @@ export default function App() {
 
         {panel === 'history' && <>
           <h2>{t.history}</h2>
-          {runs.length ? runs.map((run) => <div className="card" key={run.runId}><b>{runTitle(run)}</b><span>{run.rootPath}</span><span className="muted">{run.updatedAt ? new Date(run.updatedAt).toLocaleString() : ''} · {lang === 'ko' ? `제외 ${run.exclusionCount}개 · 오류 ${run.errorCount}개` : `${run.exclusionCount} exclusions · ${run.errorCount} errors`}</span>{run.executedCount > 0 && <button onClick={() => void openUndoPreview(run.runId)}>{t.undo}</button>}</div>) : <Empty text={t.nothing} />}
+          {runs.length ? runs.map((run) => <div className="card" key={run.runId}><b>{runTitle(run)}</b><span>{run.rootPath}</span><span className="muted">{run.updatedAt ? new Date(run.updatedAt).toLocaleString() : ''} · {lang === 'ko' ? `제외 ${run.exclusionCount}개 · 오류 ${run.errorCount}개` : `${run.exclusionCount} exclusions · ${run.errorCount} errors`}</span><div className="card-actions">{run.executedCount > 0 && <button onClick={() => void openUndoPreview(run.runId)} disabled={busy}>{t.undo}</button>}<button className="danger-action" onClick={() => void removeRun(run)} disabled={busy}><Trash2 size={14} />{lang === 'ko' ? '기록 삭제' : 'Delete'}</button></div></div>) : <Empty text={t.nothing} />}
         </>}
 
         {panel === 'ai' && <>
@@ -985,7 +1009,7 @@ export default function App() {
         </>}
       </section>
 
-      {undoPreview && <div className="modal-backdrop" role="presentation"><div className="update-modal undo-modal" role="dialog" aria-modal="true" aria-labelledby="undo-title"><button className="modal-close" onClick={() => setUndoPreview(null)} disabled={busy} aria-label={t.cancel}><X size={18} /></button><Undo2 size={30} className="modal-icon" /><h2 id="undo-title">{t.undoPreview}</h2><p>{lang === 'ko' ? '실행된 파일만 원래 위치로 복원합니다. 원래 위치에 새 파일이 있으면 덮어쓰지 않고 충돌로 기록합니다.' : 'Only files from this run are restored. A newer file at the original path is never overwritten and is reported as a conflict.'}</p><div className="release-notes undo-list">{undoPreview.actions.filter((action) => action.status === 'executed').slice(0, 100).map((action, index) => <div key={`${action.sourcePath}-${index}`}>{action.destinationPath} → {action.sourcePath}</div>)}</div><div className="modal-actions"><button className="primary-action" onClick={() => void undo(undoPreview)} disabled={busy}><Undo2 size={16} /> {t.undoConfirm}</button><button className="secondary-action" onClick={() => setUndoPreview(null)} disabled={busy}><X size={16} /> {t.cancel}</button></div></div></div>}
+      {undoPreview && <div className="modal-backdrop" role="presentation"><div className="update-modal undo-modal" role="dialog" aria-modal="true" aria-labelledby="undo-title"><button className="modal-close" onClick={() => setUndoPreview(null)} disabled={busy} aria-label={t.cancel}><X size={18} /></button><Undo2 size={30} className="modal-icon" /><h2 id="undo-title">{t.undoPreview}</h2><p>{lang === 'ko' ? '실행된 파일만 원래 위치로 복원합니다. 원래 위치에 새 파일이 있으면 덮어쓰지 않고 충돌로 기록합니다.' : 'Only files from this run are restored. A newer file at the original path is never overwritten and is reported as a conflict.'}</p><div className="undo-toolbar"><label className="undo-all"><input type="checkbox" checked={undoRows.size === undoableRows(undoPreview).length} ref={(element) => { if (element) element.indeterminate = undoRows.size > 0 && undoRows.size < undoableRows(undoPreview).length; }} onChange={() => setUndoRows(undoRows.size === undoableRows(undoPreview).length ? new Set() : new Set(undoableRows(undoPreview)))} />{lang === 'ko' ? '전체 선택' : 'Select all'}</label><strong>{lang === 'ko' ? `${undoRows.size}/${undoableRows(undoPreview).length}개 선택` : `${undoRows.size}/${undoableRows(undoPreview).length} selected`}</strong></div><div className="release-notes undo-list">{undoableRows(undoPreview).map((row) => { const action = undoPreview.actions[row]; return <label className="undo-row" key={`${action.sourcePath}-${row}`}><input type="checkbox" checked={undoRows.has(row)} onChange={() => setUndoRows((previous) => { const next = new Set(previous); if (next.has(row)) next.delete(row); else next.add(row); return next; })} /><span title={`${action.destinationPath} → ${action.sourcePath}`}>{basename(action.sourcePath)}<small>{action.destinationPath} → {action.sourcePath}</small></span></label>; })}</div><div className="modal-actions"><button className="primary-action" onClick={() => void undo(undoPreview)} disabled={busy || undoRows.size === 0}><Undo2 size={16} /> {lang === 'ko' ? `선택한 ${undoRows.size}개 되돌리기` : `Undo ${undoRows.size} selected`}</button><button className="secondary-action" onClick={() => setUndoPreview(null)} disabled={busy}><X size={16} /> {t.cancel}</button></div></div></div>}
 
       {updateModal && updateDialogState !== 'idle' && <div className="modal-backdrop" role="presentation"><div className="update-modal" role="dialog" aria-modal="true" aria-labelledby="update-title"><button className="modal-close" onClick={dismissUpdateModal} disabled={busy} aria-label={t.close}><X size={18} /></button><Download size={30} className="modal-icon" /><h2 id="update-title">{t.updateTitle}</h2>
         {updateDialogState === 'loading' && <div className="update-state update-state-loading"><RefreshCw size={20} className="spin" /><p>{t.updateLoading}</p></div>}
@@ -999,6 +1023,11 @@ export default function App() {
 
 function Empty({ text }: { text: string }) {
   return <div className="empty"><FolderTree size={36} /><p>{text}</p></div>;
+}
+
+/** Row numbers of the moves in a run that are still in place and can be undone. */
+function undoableRows(run: Plan): number[] {
+  return run.actions.flatMap((action, index) => (action.status === 'executed' ? [index] : []));
 }
 
 const TAB_ICONS: Record<Tab, LucideIcon> = { organize: FolderTree, manage: SlidersHorizontal, safety: ShieldCheck };

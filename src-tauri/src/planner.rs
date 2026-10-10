@@ -1464,9 +1464,27 @@ fn remove_empty_dirs(dirs: &[PathBuf]) {
     }
 }
 
-pub fn undo_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
+pub fn undo_plan(plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
+    undo_plan_only(plan, None)
+}
+
+/// Undo a run, or only the moves at `only` (row numbers in the plan). Moves
+/// that are not selected stay exactly as they were, so the rest can be undone
+/// later.
+pub fn undo_plan_only(
+    mut plan: OrganizationPlan,
+    only: Option<&[usize]>,
+) -> Result<OrganizationPlan, String> {
+    if let Some(bad) = only.and_then(|rows| rows.iter().find(|row| **row >= plan.actions.len())) {
+        return Err(format!(
+            "선택 번호가 기록 범위를 벗어났습니다 / selection is outside the record: {bad}"
+        ));
+    }
     let roots = plan_roots(&plan);
     for index in 0..plan.actions.len() {
+        if only.is_some_and(|rows| !rows.contains(&index)) {
+            continue;
+        }
         let action = &mut plan.actions[index];
         if action.status != "executed" {
             continue;
@@ -2789,5 +2807,63 @@ mod tests {
         plan.actions[0].status = "executed".into();
         exclude_by_user(&mut plan, &[0]).expect("exclude");
         assert_eq!(plan.actions[0].status, "executed");
+    }
+
+    #[test]
+    fn undoing_selected_moves_leaves_the_rest_undoable() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let names = ["a.txt", "b.txt", "c.txt"];
+        for name in names {
+            fs::write(root.join(name), b"x").expect("source");
+        }
+        let sources: Vec<PathBuf> = names.iter().map(|n| root.join(n)).collect();
+        let destinations: Vec<PathBuf> = names.iter().map(|n| root.join("Docs").join(n)).collect();
+        let pairs: Vec<(&Path, &Path)> = sources
+            .iter()
+            .zip(&destinations)
+            .map(|(s, d)| (s.as_path(), d.as_path()))
+            .collect();
+        let done = execute_plan_with(plan_with(root, &pairs), |_, _| Ok(())).expect("execute");
+
+        let first = undo_plan_only(done, Some(&[0, 2])).expect("partial undo");
+        let statuses: Vec<&str> = first.actions.iter().map(|a| a.status.as_str()).collect();
+        assert_eq!(statuses, ["undone", "executed", "undone"]);
+        assert!(sources[0].is_file() && sources[2].is_file());
+        assert!(
+            destinations[1].is_file(),
+            "the unselected move was not touched"
+        );
+        assert!(
+            root.join("Docs").is_dir(),
+            "the folder is still needed by the remaining file"
+        );
+
+        let rest = undo_plan(first).expect("undo the rest");
+        assert!(rest.actions.iter().all(|a| a.status == "undone"));
+        assert!(sources.iter().all(|source| source.is_file()));
+        assert!(
+            !root.join("Docs").exists(),
+            "the folder goes once its last file is back"
+        );
+    }
+
+    #[test]
+    fn an_undo_selection_outside_the_record_is_refused() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let source = root.join("a.txt");
+        fs::write(&source, b"x").expect("source");
+        let done = execute_plan_with(
+            plan_with(root, &[(&source, &root.join("Docs").join("a.txt"))]),
+            |_, _| Ok(()),
+        )
+        .expect("execute");
+        assert!(undo_plan_only(done.clone(), Some(&[0, 9])).is_err());
+        assert_eq!(done.actions[0].status, "executed");
+        assert!(
+            root.join("Docs").join("a.txt").is_file(),
+            "nothing moved on the error"
+        );
     }
 }

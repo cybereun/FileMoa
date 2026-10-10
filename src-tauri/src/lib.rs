@@ -196,13 +196,29 @@ async fn undo_organization(
     app: AppHandle,
     ops: tauri::State<'_, Operations>,
     run_id: String,
+    only: Option<Vec<usize>>,
 ) -> Result<OrganizationPlan, String> {
     let dir = runs_dir(&app)?;
     let ctl = begin(&ops, None)?;
     blocking(move || {
         let _running = ctl;
         let plan = journal::load_run(&dir, &run_id)?;
-        let mut undone = planner::undo_plan(plan)?;
+        if let Some(rows) = &only {
+            let wanted = rows
+                .iter()
+                .filter(|row| {
+                    plan.actions
+                        .get(**row)
+                        .is_some_and(|a| a.status == "executed")
+                })
+                .count();
+            if wanted == 0 {
+                return Err(
+                    "되돌릴 항목이 선택되지 않았습니다 / nothing is selected to undo".into(),
+                );
+            }
+        }
+        let mut undone = planner::undo_plan_only(plan, only.as_deref())?;
         // Files are already restored; a record that cannot be saved must not turn
         // that success into an error, so surface it as a warning instead.
         if let Err(error) = journal::save_finished(&dir, &undone) {
