@@ -12,7 +12,7 @@ use progress::{Ctl, Operations, Progress};
 use scan_store::ScanStore;
 use serde::Serialize;
 use std::path::PathBuf;
-use tauri::{ipc::Channel, AppHandle, Manager};
+use tauri::{ipc::Channel, AppHandle, Emitter, Manager};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -337,6 +337,43 @@ fn recycle_files(
     })
 }
 
+/// What a second launch asks the already running window to do. A plain second
+/// launch (no folder) only brings the window forward.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct OpenFolderRequest {
+    path: Option<String>,
+    error: Option<String>,
+}
+
+/// Read the `--organize <folder>` a second launch was started with. The first
+/// argument is the executable itself.
+fn folder_request(args: &[String]) -> OpenFolderRequest {
+    let arguments = args.iter().skip(1).map(std::ffi::OsString::from);
+    match startup_candidate(arguments) {
+        Ok(None) => OpenFolderRequest {
+            path: None,
+            error: None,
+        },
+        Ok(Some(path)) if path.is_dir() => OpenFolderRequest {
+            path: Some(path.display().to_string()),
+            error: None,
+        },
+        Ok(Some(path)) => OpenFolderRequest {
+            path: None,
+            error: Some(format!(
+                "셸에서 전달된 폴더를 찾을 수 없습니다: {} / The shell folder is not available: {}",
+                path.display(),
+                path.display()
+            )),
+        },
+        Err(error) => OpenFolderRequest {
+            path: None,
+            error: Some(error),
+        },
+    }
+}
+
 /// Logical size to open the window with: the design size, but never more than
 /// the usable part of the screen (so a laptop does not push it off-screen).
 fn start_size(work_width: f64, work_height: f64) -> (f64, f64) {
@@ -369,6 +406,18 @@ fn fit_window_to_screen(window: &tauri::WebviewWindow) {
 
 pub fn run() {
     tauri::Builder::default()
+        // Must be the first plugin. A second launch (the Explorer context menu,
+        // a shortcut) exits at once; this running window receives its folder.
+        .plugin(tauri_plugin_single_instance::init(
+            |app, args, _working_dir| {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                let _ = app.emit("open-folder", folder_request(&args));
+            },
+        ))
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 fit_window_to_screen(&window);
@@ -447,5 +496,41 @@ mod tests {
         assert_eq!(start_size(1366.0, 728.0), (1200.0, 648.0));
         // A tiny or odd work area never goes below the minimum window.
         assert_eq!(start_size(800.0, 600.0), (940.0, 620.0));
+    }
+
+    #[test]
+    fn a_second_launch_names_the_folder_to_open() {
+        use super::{folder_request, OpenFolderRequest};
+        let folder = std::env::temp_dir();
+        let exe = "C:\\Program Files\\FileMoa\\filemoa.exe".to_string();
+
+        // Only the executable: just bring the window forward.
+        assert_eq!(
+            folder_request(&[exe.clone()]),
+            OpenFolderRequest {
+                path: None,
+                error: None
+            }
+        );
+        // The Explorer verb: --organize <existing folder>.
+        let ok = folder_request(&[
+            exe.clone(),
+            "--organize".into(),
+            folder.display().to_string(),
+        ]);
+        assert_eq!(
+            ok.path.as_deref(),
+            Some(folder.display().to_string().as_str())
+        );
+        assert!(ok.error.is_none());
+        // A folder that is gone, and a marker without a path, are reported, not opened.
+        let missing = folder_request(&[
+            exe.clone(),
+            "--organize".into(),
+            "N:\\no\\such\\folder".into(),
+        ]);
+        assert!(missing.path.is_none() && missing.error.is_some());
+        let dangling = folder_request(&[exe, "--organize".into()]);
+        assert!(dangling.path.is_none() && dangling.error.is_some());
     }
 }

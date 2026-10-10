@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { basename, cloudOnlyNotice, duplicateGroupTitle, planSummary, formatBytes, isCancelledError, progressPercent, providerStatus, requestCount, runTitle, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
+import { basename, cloudOnlyNotice, decideOpenFolder, duplicateGroupTitle, planSummary, formatBytes, isCancelledError, progressPercent, providerStatus, requestCount, runTitle, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
 
 describe('FileMoa UI utilities', () => {
   it('formats byte counts for the large-file view', () => {
@@ -78,5 +78,17 @@ describe('FileMoa UI utilities', () => {
   it('titles a duplicate group with the space the extra copies take', () => {
     expect(duplicateGroupTitle(3, 8 * 1024 * 1024, 'ko')).toBe('3개 파일 · 8.0 MB 절약 가능');
     expect(duplicateGroupTitle(3, 8 * 1024 * 1024, 'en')).toBe('3 files · 8.0 MB reclaimable');
+  });
+
+  it('decides what a folder handed over by a second launch does', () => {
+    const idle = { busy: false, hasPreview: false };
+    expect(decideOpenFolder({}, idle)).toBe('bring-forward');
+    expect(decideOpenFolder({ path: null, error: null }, { busy: true, hasPreview: true })).toBe('bring-forward');
+    expect(decideOpenFolder({ error: 'folder is gone' }, idle)).toBe('error');
+    expect(decideOpenFolder({ path: 'C:\\Photos' }, idle)).toBe('open');
+    expect(decideOpenFolder({ path: 'C:\\Photos' }, { busy: false, hasPreview: true })).toBe('confirm');
+    // A running operation wins over everything else about the window.
+    expect(decideOpenFolder({ path: 'C:\\Photos' }, { busy: true, hasPreview: true })).toBe('busy');
+    expect(decideOpenFolder({ path: 'C:\\Photos' }, { busy: true, hasPreview: false })).toBe('busy');
   });
 });

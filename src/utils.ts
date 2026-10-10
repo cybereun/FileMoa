@@ -87,3 +87,18 @@ export function duplicateGroupTitle(fileCount: number, reclaimableBytes: number,
     ? `${fileCount}개 파일 · ${megabytes} MB 절약 가능`
     : `${fileCount} files · ${megabytes} MB reclaimable`;
 }
+
+export type OpenFolderRequest = { path?: string | null; error?: string | null };
+export type OpenFolderDecision = 'bring-forward' | 'error' | 'busy' | 'confirm' | 'open';
+
+/**
+ * What the running window does when another launch hands it a folder: a plain
+ * launch only comes to the front; a bad folder is reported; while something is
+ * running nothing is touched; an unsent preview needs the user's say-so.
+ */
+export function decideOpenFolder(request: OpenFolderRequest, state: { busy: boolean; hasPreview: boolean }): OpenFolderDecision {
+  if (request.error) return 'error';
+  if (!request.path) return 'bring-forward';
+  if (state.busy) return 'busy';
+  return state.hasPreview ? 'confirm' : 'open';
+}

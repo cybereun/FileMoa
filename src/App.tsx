@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
+import { listen } from '@tauri-apps/api/event';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import packageJson from '../package.json';
@@ -40,7 +41,7 @@ import {
 } from 'lucide-react';
 import appIcon from './assets/app-icon.png';
 import './styles.css';
-import { basename, cloudOnlyNotice as cloudOnlyMessage, duplicateGroupTitle, formatBytes, isCancelledError, planSummary, progressPercent, providerStatus, requestCount, runTitle as runTitleText, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
+import { basename, cloudOnlyNotice as cloudOnlyMessage, decideOpenFolder, duplicateGroupTitle, formatBytes, isCancelledError, planSummary, progressPercent, providerStatus, requestCount, runTitle as runTitleText, shouldOpenUpdateModal, shouldUseStartupPath, type OpenFolderRequest } from './utils';
 
 type Category = { name: string; extensions: string[]; enabled: boolean };
 type KeywordRule = { keyword: string; category: string; caseSensitive?: boolean };
@@ -262,6 +263,10 @@ export default function App() {
     () => plan?.actions.filter((action, index) => action.status === 'proposed' && !unchecked.has(index)).length ?? 0,
     [plan, unchecked],
   );
+  // Read by the listener below, which is registered once and must see current values.
+  const outside = useRef({ busy: false, hasPreview: false, lang });
+  outside.current = { busy, hasPreview: pendingCount > 0, lang };
+
   function toggleRow(index: number) {
     setUnchecked((previous) => {
       const next = new Set(previous);
@@ -810,6 +815,41 @@ export default function App() {
     })();
     // Startup checks are silent: they only set the update badge/notice.
     void checkForUpdate(false);
+  }, []);
+
+  // Another launch (Explorer's right-click menu, a shortcut) hands its folder to this window.
+  useEffect(() => {
+    let stop: (() => void) | undefined;
+    let cancelled = false;
+    void listen<OpenFolderRequest>('open-folder', (event) => {
+      const { busy: isBusy, hasPreview, lang: language } = outside.current;
+      const request = event.payload;
+      const folder = request.path ?? '';
+      const decision = decideOpenFolder(request, { busy: isBusy, hasPreview });
+      if (decision === 'bring-forward') return;
+      if (decision === 'error') { setNotice(request.error ?? ''); return; }
+      if (decision === 'busy') {
+        setNotice(language === 'ko'
+          ? `작업이 진행 중이라 폴더를 바꾸지 못했습니다. 끝난 뒤 다시 열어 주세요: ${folder}`
+          : `A task is running, so the folder was not changed. Open it again when it finishes: ${folder}`);
+        return;
+      }
+      if (decision === 'confirm' && !confirm(language === 'ko'
+        ? `현재 정리 미리보기를 버리고 "${folder}" 폴더로 바꿀까요?\n(아직 이동하지 않은 미리보기는 사라집니다.)`
+        : `Discard the current preview and switch to "${folder}"?\n(The preview that has not been run will be lost.)`)) return;
+      setTab('organize');
+      setPanel('plan');
+      setPlan(null);
+      setPaths([folder]);
+      setPath(folder);
+      setNotice('');
+    }).then((unlisten) => {
+      if (cancelled) unlisten(); else stop = unlisten;
+    });
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
   }, []);
 
   useEffect(() => {
