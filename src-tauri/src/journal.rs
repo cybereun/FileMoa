@@ -7,7 +7,8 @@
 //! the journal is removed. If the app dies mid-run, `recover` replays the
 //! journal on the next start so the files that did move can still be undone.
 
-use crate::planner::{execute_plan_with, OrganizationPlan, PlannedAction};
+use crate::planner::{execute_plan_ctl, OrganizationPlan, PlannedAction};
+use crate::progress::Ctl;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -168,13 +169,24 @@ impl RunJournal {
 /// Execute `plan`, journaling each action. If the journal can no longer be
 /// written, stop moving files: the remaining actions are skipped rather than
 /// executed without a record.
+#[cfg(test)]
 pub fn execute_with_journal(
     dir: &Path,
+    plan: OrganizationPlan,
+) -> Result<OrganizationPlan, String> {
+    execute_with_journal_ctl(dir, plan, &Ctl::none())
+}
+
+/// Same, with progress and cancellation: a cancel stops after the file being
+/// moved and the run record stays complete, so it can still be undone.
+pub fn execute_with_journal_ctl(
+    dir: &Path,
     mut plan: OrganizationPlan,
+    ctl: &Ctl,
 ) -> Result<OrganizationPlan, String> {
     let mut journal = RunJournal::begin(dir, &mut plan)?;
     let mut journal_error: Option<String> = None;
-    let mut plan = execute_plan_with(plan, |index, action| {
+    let mut plan = execute_plan_ctl(plan, ctl, |index, action| {
         if journal_error.is_some() {
             return Err("journal unavailable".to_string());
         }

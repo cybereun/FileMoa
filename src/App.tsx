@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import packageJson from '../package.json';
 import {
@@ -66,6 +66,7 @@ type RunSummary = {
   exclusionCount: number;
 };
 type ScanResult<T> = { items: T[]; cloudOnlySkipped: number };
+type ProgressInfo = { phase: 'scan' | 'quick' | 'hash' | 'move'; done: number; total: number; current: string };
 type Duplicate = {
   hash: string;
   sizeBytes: number;
@@ -216,6 +217,7 @@ export default function App() {
   const [aiResult, setAiResult] = useState<AiResult | null>(null);
   const [approvedAiIds, setApprovedAiIds] = useState<number[]>([]);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<ProgressInfo | null>(null);
   const [notice, setNotice] = useState('');
   const [settings, setSettings] = useState(false);
   const [name, setName] = useState('');
@@ -267,6 +269,30 @@ export default function App() {
     return key in t ? t[key] : id;
   }
 
+  /** Run a long backend command and show its progress; the backend allows one at a time. */
+  async function withProgress<T>(command: string, args: Record<string, unknown>): Promise<T> {
+    const channel = new Channel<ProgressInfo>();
+    channel.onmessage = setProgress;
+    try {
+      return await invoke<T>(command, { ...args, onProgress: channel });
+    } finally {
+      setProgress(null);
+    }
+  }
+
+  function failure(error: unknown) {
+    const cancelled = /취소되었습니다|was cancelled/.test(String(error));
+    setNotice(cancelled ? (lang === 'ko' ? '작업을 취소했습니다.' : 'The operation was cancelled.') : String(error));
+  }
+
+  async function cancelOperation() {
+    try {
+      await invoke('cancel_operation');
+    } catch (error) {
+      setNotice(String(error));
+    }
+  }
+
   async function makePlan() {
     if (!path) return;
     setBusy(true);
@@ -285,13 +311,13 @@ export default function App() {
           keywordRules: rules,
         };
       const next = paths.length > 1
-        ? await invoke<Plan>('plan_multiple_organizations', { requests: paths.map((rootPath) => ({ ...request, rootPath })) })
-        : await invoke<Plan>('plan_organization', { request: { ...request, rootPath: paths[0] ?? path } });
+        ? await withProgress<Plan>('plan_multiple_organizations', { requests: paths.map((rootPath) => ({ ...request, rootPath })) })
+        : await withProgress<Plan>('plan_organization', { request: { ...request, rootPath: paths[0] ?? path } });
       setPlan(next);
       setPanel('plan');
       setNotice('');
     } catch (error) {
-      setNotice(String(error));
+      failure(error);
     } finally {
       setBusy(false);
     }
@@ -325,13 +351,17 @@ export default function App() {
     if (!confirm(confirmation)) return;
     setBusy(true);
     try {
-      const done = await invoke<Plan>('execute_organization', { planId: plan.planId });
+      const done = await withProgress<Plan>('execute_organization', { planId: plan.planId });
       setPlan(done);
       void refreshRuns();
       setPanel('history');
-      setNotice(lang === 'ko' ? '정리가 완료되었습니다.' : 'Organization completed.');
+      const cancelledCount = done.actions.filter((action) => action.status === 'skipped' && /취소|cancel/i.test(action.reason)).length;
+      const movedCount = done.actions.filter((action) => action.status === 'executed').length;
+      setNotice(cancelledCount
+        ? (lang === 'ko' ? `취소했습니다. ${movedCount}개는 이동했고 ${cancelledCount}개는 그대로 남았습니다. 정리 기록에서 되돌릴 수 있습니다.` : `Cancelled. ${movedCount} moved, ${cancelledCount} left in place. You can undo the moved ones from the history.`)
+        : (lang === 'ko' ? '정리가 완료되었습니다.' : 'Organization completed.'));
     } catch (error) {
-      setNotice(String(error));
+      failure(error);
     } finally {
       setBusy(false);
     }
@@ -358,7 +388,7 @@ export default function App() {
       setUndoPreview(null);
       setNotice(lang === 'ko' ? '마지막 정리를 되돌렸습니다.' : 'Last organization was undone.');
     } catch (error) {
-      setNotice(String(error));
+      failure(error);
     } finally {
       setBusy(false);
     }
@@ -375,13 +405,14 @@ export default function App() {
     setNotice('');
     setBusy(true);
     try {
-      const scans = await Promise.all(roots.map((rootPath) => invoke<ScanResult<Duplicate>>('find_duplicates', { rootPath, includeSubfolders: sub })));
+      const scans: ScanResult<Duplicate>[] = [];
+      for (const rootPath of roots) scans.push(await withProgress<ScanResult<Duplicate>>('find_duplicates', { rootPath, includeSubfolders: sub }));
       if (requestId === scanRequestRef.current) {
         setDuplicates(scans.flatMap((scan) => scan.items));
         setNotice(cloudOnlyNotice(scans.reduce((sum, scan) => sum + scan.cloudOnlySkipped, 0)));
       }
     } catch (error) {
-      if (requestId === scanRequestRef.current) setNotice(String(error));
+      if (requestId === scanRequestRef.current) failure(error);
     } finally {
       if (requestId === scanRequestRef.current) {
         setScanPanel(null);
@@ -409,13 +440,14 @@ export default function App() {
     setBusy(true);
     try {
       const threshold = Math.max(1, Number(largeThresholdMb) || 100) * 1024 * 1024;
-      const scans = await Promise.all(roots.map((rootPath) => invoke<ScanResult<LargeFile>>('find_large_files', { rootPath, includeSubfolders: sub, minimumSizeBytes: threshold })));
+      const scans: ScanResult<LargeFile>[] = [];
+      for (const rootPath of roots) scans.push(await withProgress<ScanResult<LargeFile>>('find_large_files', { rootPath, includeSubfolders: sub, minimumSizeBytes: threshold }));
       if (requestId === scanRequestRef.current) {
         setLargeFiles(scans.flatMap((scan) => scan.items));
         setNotice(cloudOnlyNotice(scans.reduce((sum, scan) => sum + scan.cloudOnlySkipped, 0)));
       }
     } catch (error) {
-      if (requestId === scanRequestRef.current) setNotice(String(error));
+      if (requestId === scanRequestRef.current) failure(error);
     } finally {
       if (requestId === scanRequestRef.current) {
         setScanPanel(null);
@@ -435,10 +467,11 @@ export default function App() {
     setNotice('');
     setBusy(true);
     try {
-      const results = (await Promise.all(roots.map((rootPath) => invoke<string[]>('find_empty_folders', { rootPath, includeSubfolders: sub })))).flat();
+      const results: string[] = [];
+      for (const rootPath of roots) results.push(...(await withProgress<string[]>('find_empty_folders', { rootPath, includeSubfolders: sub })));
       if (requestId === scanRequestRef.current) setEmptyFolders(results);
     } catch (error) {
-      if (requestId === scanRequestRef.current) setNotice(String(error));
+      if (requestId === scanRequestRef.current) failure(error);
     } finally {
       if (requestId === scanRequestRef.current) {
         setScanPanel(null);
@@ -465,7 +498,7 @@ export default function App() {
         ? `${moved.length}개 항목을 휴지통으로 보냈습니다.${skippedCount ? ` ${skippedCount}개는 삭제하지 않았습니다: ${firstReason}` : ''}`
         : `${moved.length} item(s) moved to the Recycle Bin.${skippedCount ? ` ${skippedCount} item(s) were not deleted: ${firstReason}` : ''}`);
     } catch (error) {
-      setNotice(String(error));
+      failure(error);
     } finally {
       setBusy(false);
     }
@@ -826,6 +859,7 @@ export default function App() {
         <code className="ribbon-path" title={path || t.empty}>{path || t.empty}</code>
       </section>
 
+      {progress && <ProgressBar progress={progress} lang={lang} onCancel={() => void cancelOperation()} />}
       {notice && <p className="notice">{notice}</p>}
 
       <section className="workspace">
@@ -912,6 +946,29 @@ export default function App() {
 
 function Empty({ text }: { text: string }) {
   return <div className="empty"><FolderTree size={36} /><p>{text}</p></div>;
+}
+
+function ProgressBar({ progress, lang, onCancel }: { progress: ProgressInfo; lang: 'ko' | 'en'; onCancel: () => void }) {
+  const labels: Record<ProgressInfo['phase'], [string, string]> = {
+    scan: ['폴더를 읽는 중', 'Reading folders'],
+    quick: ['같은 크기의 파일을 빠르게 비교하는 중', 'Comparing same-size files'],
+    hash: ['파일 내용을 비교하는 중', 'Comparing file contents'],
+    move: ['파일을 이동하는 중', 'Moving files'],
+  };
+  const label = labels[progress.phase][lang === 'ko' ? 0 : 1];
+  const known = progress.total > 0;
+  const percent = known ? Math.min(100, Math.round((progress.done / progress.total) * 100)) : 0;
+  const count = progress.phase === 'hash'
+    ? `${formatBytes(progress.done)} / ${formatBytes(progress.total)}`
+    : known ? `${progress.done} / ${progress.total}` : `${progress.done}`;
+  return (
+    <div className="progress-card" role="status" aria-live="polite">
+      <div className="progress-head"><b>{label}</b><span>{known ? `${percent}% · ` : ''}{count}</span></div>
+      {known ? <progress value={progress.done} max={progress.total} /> : <progress />}
+      <small className="progress-current">{progress.current}</small>
+      <button className="secondary-action" onClick={onCancel}>{lang === 'ko' ? '취소' : 'Cancel'}</button>
+    </div>
+  );
 }
 
 function Loading({ text }: { text: string }) {

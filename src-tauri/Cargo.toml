@@ -34,3 +34,8 @@ tempfile = "3"
 [profile.dev]
 debug = 0
 incremental = false
+
+# Hashing gigabytes in an unoptimised build is ~10x slower and makes dev tests
+# of the duplicate scan misleading.
+[profile.dev.package.sha2]
+opt-level = 3

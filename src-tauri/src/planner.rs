@@ -1,3 +1,4 @@
+use crate::progress::Ctl;
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -833,7 +834,12 @@ fn root_warnings(root: &Path) -> Vec<String> {
     warnings
 }
 
+#[cfg(test)]
 pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
+    create_plan_ctl(req, &Ctl::none())
+}
+
+pub fn create_plan_ctl(req: PlanRequest, ctl: &Ctl) -> Result<OrganizationPlan, String> {
     let root = PathBuf::from(&req.root_path);
     if !root.is_dir() {
         return Err("선택한 폴더를 찾을 수 없습니다. / The selected folder does not exist.".into());
@@ -856,7 +862,10 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
     } else {
         WalkDir::new(&root).min_depth(1).max_depth(1)
     };
+    let mut seen: u64 = 0;
     for item in walker {
+        ctl.check()?;
+        seen += 1;
         let entry = match item {
             Ok(entry) => entry,
             Err(error) => {
@@ -865,6 +874,7 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
             }
         };
         let path = entry.path();
+        ctl.report("scan", seen, 0, &path.to_string_lossy(), false);
         if entry.file_type().is_dir() {
             if path != root && projects.is_project(path) {
                 exclusions.push(format!(
@@ -968,13 +978,16 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
 /// Build one dry-run snapshot for several independently selected roots. Each
 /// root is scanned with the same settings, while moves never cross root
 /// boundaries.
-pub fn create_multi_plan(requests: Vec<PlanRequest>) -> Result<OrganizationPlan, String> {
+pub fn create_multi_plan_ctl(
+    requests: Vec<PlanRequest>,
+    ctl: &Ctl,
+) -> Result<OrganizationPlan, String> {
     if requests.is_empty() {
         return Err("정리할 폴더를 하나 이상 선택하세요. / Select at least one folder.".into());
     }
     let mut plans = Vec::with_capacity(requests.len());
     for request in requests {
-        plans.push(create_plan(request)?);
+        plans.push(create_plan_ctl(request, ctl)?);
     }
     let language = plans[0].language.clone();
     let basis = plans[0].basis.clone();
@@ -1150,17 +1163,47 @@ fn move_with_unique_name(from: &Path, destination: PathBuf) -> io::Result<(PathB
 /// `on_action` right after it is settled, so callers can journal progress
 /// before the next file is touched. If `on_action` fails, no further file is
 /// moved: the remaining proposed actions are skipped and the error recorded.
+#[cfg(test)]
 pub fn execute_plan_with<F>(
+    plan: OrganizationPlan,
+    on_action: F,
+) -> Result<OrganizationPlan, String>
+where
+    F: FnMut(usize, &PlannedAction) -> Result<(), String>,
+{
+    execute_plan_ctl(plan, &Ctl::none(), on_action)
+}
+
+/// Like `execute_plan_with`, and stops after the file being moved when the
+/// user cancels: the rest is skipped and the run stays undoable.
+pub fn execute_plan_ctl<F>(
     mut plan: OrganizationPlan,
+    ctl: &Ctl,
     mut on_action: F,
 ) -> Result<OrganizationPlan, String>
 where
     F: FnMut(usize, &PlannedAction) -> Result<(), String>,
 {
     let roots = plan_roots(&plan);
+    let total = plan
+        .actions
+        .iter()
+        .filter(|action| action.status == "proposed")
+        .count() as u64;
+    let mut done: u64 = 0;
     for index in 0..plan.actions.len() {
         if plan.actions[index].status != "proposed" {
             continue;
+        }
+        if ctl.cancelled() {
+            for action in &mut plan.actions[index..] {
+                if action.status == "proposed" {
+                    action.status = "skipped".into();
+                    action.reason =
+                        "사용자가 취소하여 건너뜀 / skipped: cancelled by the user".into();
+                }
+            }
+            break;
         }
         if let Some(reason) = path_blocker(&plan.actions[index], &roots) {
             plan.actions[index].status = "skipped".into();
@@ -1172,6 +1215,14 @@ where
         } else {
             run_action(&mut plan, index);
         }
+        done += 1;
+        ctl.report(
+            "move",
+            done,
+            total,
+            &plan.actions[index].source_path,
+            done == total,
+        );
         if let Err(error) = on_action(index, &plan.actions[index]) {
             plan.errors.push(error);
             for action in &mut plan.actions[index + 1..] {
@@ -1324,22 +1375,42 @@ pub fn undo_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String>
     Ok(plan)
 }
 
+#[cfg(test)]
 fn hash_file(path: &Path) -> io::Result<String> {
+    hash_prefix(path, u64::MAX, &Ctl::none(), &|_| {})
+}
+
+/// SHA-256 of the first `limit` bytes (the whole file for `u64::MAX`).
+/// `on_bytes` sees every chunk so progress can be bytes-accurate, and a
+/// cancel is noticed between chunks.
+fn hash_prefix(
+    path: &Path,
+    limit: u64,
+    ctl: &Ctl,
+    on_bytes: &(dyn Fn(u64) + Sync),
+) -> io::Result<String> {
     // Last line of defence: opening a placeholder for reading downloads it.
     if is_cloud_only(&fs::metadata(path)?) {
         return Err(io::Error::other("cloud-only file is not read"));
     }
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
-    // Tauri IPC workers use relatively small stacks on Windows. Keep the
-    // streaming buffer on the heap so a duplicate scan cannot overflow one.
+    // Worker threads have small stacks on Windows. Keep the streaming buffer
+    // on the heap so a duplicate scan cannot overflow one.
     let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
+    let mut remaining = limit;
+    while remaining > 0 {
+        if ctl.cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let want = remaining.min(buffer.len() as u64) as usize;
+        let read = file.read(&mut buffer[..want])?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
+        on_bytes(read as u64);
+        remaining -= read as u64;
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
@@ -1353,7 +1424,57 @@ fn scan_entries(root: &str, sub: bool) -> impl Iterator<Item = Result<DirEntry, 
     walk.into_iter()
 }
 
+/// Files this large or smaller are fully covered by the quick hash.
+const QUICK_BYTES: u64 = 64 * 1024;
+
+/// Run `work` over `items` on a few threads, keeping the input order.
+fn parallel_map<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    };
+    let threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(2)
+        .clamp(1, 4)
+        .min(items.len().max(1));
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<(usize, R)>> = Mutex::new(Vec::with_capacity(items.len()));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::SeqCst);
+                if index >= items.len() {
+                    break;
+                }
+                let value = work(&items[index]);
+                results
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((index, value));
+            });
+        }
+    });
+    let mut ordered = results
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ordered.sort_by_key(|(index, _)| *index);
+    ordered.into_iter().map(|(_, value)| value).collect()
+}
+
+#[cfg(test)]
 pub fn find_duplicates(root: &str, sub: bool) -> Result<ScanResult<DuplicateGroup>, String> {
+    find_duplicates_ctl(root, sub, &Ctl::none())
+}
+
+/// Size groups first, then a hash of the first 64 KB, then the full SHA-256
+/// only for files that still look identical. Hashing runs on a few threads.
+pub fn find_duplicates_ctl(
+    root: &str,
+    sub: bool,
+    ctl: &Ctl,
+) -> Result<ScanResult<DuplicateGroup>, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
     if !Path::new(root).is_dir() {
         return Err(format!(
             "중복 파일을 찾을 폴더를 찾을 수 없습니다 / duplicate scan folder not found: {root}"
@@ -1361,11 +1482,15 @@ pub fn find_duplicates(root: &str, sub: bool) -> Result<ScanResult<DuplicateGrou
     }
     let mut sizes: HashMap<u64, Vec<PathBuf>> = HashMap::new();
     let mut cloud_only_skipped = 0;
+    let mut seen: u64 = 0;
     for item in scan_entries(root, sub) {
+        ctl.check()?;
         let entry = match item {
             Ok(entry) => entry,
             Err(_) => continue,
         };
+        seen += 1;
+        ctl.report("scan", seen, 0, &entry.path().to_string_lossy(), false);
         if !entry.file_type().is_file() || protected(entry.path()) {
             continue;
         }
@@ -1383,50 +1508,131 @@ pub fn find_duplicates(root: &str, sub: bool) -> Result<ScanResult<DuplicateGrou
                 .push(entry.into_path());
         }
     }
+
+    // Stage 1: a hash of the first 64 KB separates almost everything that
+    // merely shares a size, at a tiny fraction of the reading.
+    let candidates: Vec<(u64, PathBuf)> = sizes
+        .into_iter()
+        .filter(|(_, files)| files.len() >= 2)
+        .flat_map(|(size, files)| files.into_iter().map(move |path| (size, path)))
+        .collect();
+    let quick_done = AtomicU64::new(0);
+    let quick_total = candidates.len() as u64;
+    let quick = parallel_map(&candidates, |(size, path)| {
+        let hash = hash_prefix(path, (*size).min(QUICK_BYTES), ctl, &|_| {}).ok();
+        let done = quick_done.fetch_add(1, Ordering::Relaxed) + 1;
+        ctl.report(
+            "quick",
+            done,
+            quick_total,
+            &path.to_string_lossy(),
+            done == quick_total,
+        );
+        hash
+    });
+    ctl.check()?;
+    let mut buckets: HashMap<(u64, String), Vec<PathBuf>> = HashMap::new();
+    for ((size, path), hash) in candidates.into_iter().zip(quick) {
+        if let Some(hash) = hash {
+            buckets.entry((size, hash)).or_default().push(path);
+        }
+    }
+
+    // Stage 2: the full SHA-256, only where the quick hashes agree. Files up
+    // to 64 KB are already fully hashed.
     let mut groups = Vec::new();
-    for (size, files) in sizes {
+    let mut need_full: Vec<(u64, PathBuf)> = Vec::new();
+    for ((size, hash), files) in &buckets {
         if files.len() < 2 {
             continue;
         }
-        let mut hashes: HashMap<String, Vec<String>> = HashMap::new();
-        for path in files {
-            if let Ok(hash) = hash_file(&path) {
-                hashes
-                    .entry(hash)
-                    .or_default()
-                    .push(path.display().to_string());
-            }
-        }
-        for (hash, paths) in hashes {
-            if paths.len() > 1 {
-                groups.push(DuplicateGroup {
-                    hash,
-                    size_bytes: size,
-                    reclaimable_bytes: size.saturating_mul(paths.len() as u64 - 1),
-                    file_paths: paths,
-                });
-            }
+        if *size <= QUICK_BYTES {
+            groups.push(DuplicateGroup {
+                hash: hash.clone(),
+                size_bytes: *size,
+                reclaimable_bytes: size.saturating_mul(files.len() as u64 - 1),
+                file_paths: files
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+            });
+        } else {
+            need_full.extend(files.iter().map(|path| (*size, path.clone())));
         }
     }
-    groups.sort_by(|left, right| right.reclaimable_bytes.cmp(&left.reclaimable_bytes));
+    let full_total: u64 = need_full.iter().map(|(size, _)| *size).sum();
+    let full_done = AtomicU64::new(0);
+    let full = parallel_map(&need_full, |(_, path)| {
+        let name = path.to_string_lossy();
+        hash_prefix(path, u64::MAX, ctl, &|bytes| {
+            let done = full_done.fetch_add(bytes, Ordering::Relaxed) + bytes;
+            ctl.report("hash", done, full_total, &name, false);
+        })
+        .ok()
+    });
+    ctl.check()?;
+    ctl.report("hash", full_total, full_total, "", true);
+    let mut by_hash: HashMap<(u64, String), Vec<String>> = HashMap::new();
+    for ((size, path), hash) in need_full.into_iter().zip(full) {
+        if let Some(hash) = hash {
+            by_hash
+                .entry((size, hash))
+                .or_default()
+                .push(path.display().to_string());
+        }
+    }
+    for ((size, hash), paths) in by_hash {
+        if paths.len() > 1 {
+            groups.push(DuplicateGroup {
+                hash,
+                size_bytes: size,
+                reclaimable_bytes: size.saturating_mul(paths.len() as u64 - 1),
+                file_paths: paths,
+            });
+        }
+    }
+    // Stable order: biggest saving first, then by hash so runs are repeatable.
+    groups.sort_by(|left, right| {
+        right
+            .reclaimable_bytes
+            .cmp(&left.reclaimable_bytes)
+            .then_with(|| left.hash.cmp(&right.hash))
+    });
+    for group in &mut groups {
+        group.file_paths.sort();
+    }
     Ok(ScanResult {
         items: groups,
         cloud_only_skipped,
     })
 }
 
+#[cfg(test)]
 pub fn find_large_files(
     root: &str,
     sub: bool,
     minimum_size_bytes: u64,
 ) -> Result<ScanResult<LargeFile>, String> {
+    find_large_files_ctl(root, sub, minimum_size_bytes, &Ctl::none())
+}
+
+pub fn find_large_files_ctl(
+    root: &str,
+    sub: bool,
+    minimum_size_bytes: u64,
+    ctl: &Ctl,
+) -> Result<ScanResult<LargeFile>, String> {
     let mut files = Vec::new();
     let mut cloud_only_skipped = 0;
+    let mut seen: u64 = 0;
     for item in scan_entries(root, sub) {
+        ctl.check()?;
         let entry = match item {
             Ok(entry) => entry,
             Err(_) => continue,
         };
+        seen += 1;
+        ctl.report("scan", seen, 0, &entry.path().to_string_lossy(), false);
         if !entry.file_type().is_file() || protected(entry.path()) {
             continue;
         }
@@ -1453,13 +1659,22 @@ pub fn find_large_files(
     })
 }
 
+#[cfg(test)]
 pub fn find_empty_folders(root: &str, sub: bool) -> Result<Vec<String>, String> {
+    find_empty_folders_ctl(root, sub, &Ctl::none())
+}
+
+pub fn find_empty_folders_ctl(root: &str, sub: bool, ctl: &Ctl) -> Result<Vec<String>, String> {
     let mut folders = Vec::new();
+    let mut seen: u64 = 0;
     for item in scan_entries(root, sub) {
+        ctl.check()?;
         let entry = match item {
             Ok(entry) => entry,
             Err(_) => continue,
         };
+        seen += 1;
+        ctl.report("scan", seen, 0, &entry.path().to_string_lossy(), false);
         if !entry.file_type().is_dir()
             || entry.path() == Path::new(root)
             || protected(entry.path())
@@ -2066,5 +2281,176 @@ mod tests {
         };
         assert_eq!(status("kept.txt"), "proposed");
         assert_eq!(status("edited.txt"), "skipped");
+    }
+
+    #[test]
+    fn same_size_and_same_first_64kb_but_different_tail_are_not_duplicates() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let size = 300 * 1024;
+        let mut a = vec![1_u8; size];
+        let mut b = a.clone();
+        let c = a.clone();
+        a[size - 1] = 2; // differs only in the last byte, far past the quick hash
+        b[size - 1] = 3;
+        fs::write(root.join("a.bin"), &a).expect("a");
+        fs::write(root.join("b.bin"), &b).expect("b");
+        fs::write(root.join("c1.bin"), &c).expect("c1");
+        fs::write(root.join("c2.bin"), &c).expect("c2");
+        // Small files are fully covered by the quick hash.
+        fs::write(root.join("s1.txt"), b"tiny").expect("s1");
+        fs::write(root.join("s2.txt"), b"tiny").expect("s2");
+
+        let found = find_duplicates(&root.display().to_string(), false)
+            .expect("scan")
+            .items;
+        assert_eq!(found.len(), 2, "{found:?}");
+        let big = found
+            .iter()
+            .find(|group| group.size_bytes == size as u64)
+            .expect("big group");
+        assert_eq!(big.file_paths.len(), 2);
+        assert!(big
+            .file_paths
+            .iter()
+            .all(|path| path.contains("c1") || path.contains("c2")));
+        assert_eq!(big.hash.len(), 64, "a full SHA-256, not the quick one");
+        let small = found
+            .iter()
+            .find(|group| group.size_bytes == 4)
+            .expect("small group");
+        assert_eq!(small.file_paths.len(), 2);
+        assert_eq!(small.hash.len(), 64);
+    }
+
+    #[test]
+    fn duplicate_results_are_stable_across_runs() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        for index in 0..12 {
+            fs::write(
+                root.join(format!("x{index}.bin")),
+                vec![(index % 3) as u8; 100 * 1024],
+            )
+            .expect("file");
+        }
+        let run = || {
+            find_duplicates(&root.display().to_string(), false)
+                .expect("scan")
+                .items
+                .iter()
+                .map(|group| group.file_paths.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(), run(), "threads must not change the order of results");
+    }
+
+    #[test]
+    fn a_cancelled_scan_or_plan_returns_the_cancel_error() {
+        use crate::progress::{Operations, CANCELLED};
+        let directory = tempdir().expect("temp directory");
+        fs::write(directory.path().join("a.bin"), b"x").expect("a");
+        fs::write(directory.path().join("b.bin"), b"x").expect("b");
+        let root = directory.path().display().to_string();
+
+        let operations = Operations::default();
+        let ctl = operations.begin(None).expect("begin");
+        operations.cancel();
+        assert_eq!(
+            find_duplicates_ctl(&root, false, &ctl).unwrap_err(),
+            CANCELLED
+        );
+        assert_eq!(
+            find_large_files_ctl(&root, false, 0, &ctl).unwrap_err(),
+            CANCELLED
+        );
+        assert_eq!(
+            find_empty_folders_ctl(&root, false, &ctl).unwrap_err(),
+            CANCELLED
+        );
+        assert_eq!(
+            create_plan_ctl(request(directory.path()), &ctl).unwrap_err(),
+            CANCELLED
+        );
+    }
+
+    #[test]
+    fn cancelling_during_a_move_stops_after_the_current_file() {
+        use crate::progress::Operations;
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let names = ["a.txt", "b.txt", "c.txt", "d.txt"];
+        for name in names {
+            fs::write(root.join(name), b"x").expect("source");
+        }
+        let destinations: Vec<PathBuf> = names.iter().map(|n| root.join("Docs").join(n)).collect();
+        let sources: Vec<PathBuf> = names.iter().map(|n| root.join(n)).collect();
+        let pairs: Vec<(&Path, &Path)> = sources
+            .iter()
+            .zip(&destinations)
+            .map(|(s, d)| (s.as_path(), d.as_path()))
+            .collect();
+        let plan = plan_with(root, &pairs);
+
+        let operations = Operations::default();
+        let ctl = operations.begin(None).expect("begin");
+        // The user presses Cancel while the second file is being settled.
+        let done = execute_plan_ctl(plan, &ctl, |index, _| {
+            if index == 1 {
+                operations.cancel();
+            }
+            Ok(())
+        })
+        .expect("execute");
+        let statuses: Vec<&str> = done.actions.iter().map(|a| a.status.as_str()).collect();
+        assert_eq!(statuses, ["executed", "executed", "skipped", "skipped"]);
+        assert!(destinations[1].is_file() && sources[2].is_file() && sources[3].is_file());
+        assert!(done.actions[3].reason.contains("cancel"));
+        // What did move is still undoable.
+        let undone = undo_plan(done).expect("undo");
+        assert!(sources.iter().all(|source| source.is_file()));
+        assert!(!root.join("Docs").exists());
+        assert_eq!(undone.actions[0].status, "undone");
+    }
+
+    #[test]
+    fn scans_and_moves_report_progress() {
+        use crate::progress::{Operations, Progress};
+        use std::sync::{Arc, Mutex};
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        for name in ["a.bin", "b.bin"] {
+            fs::write(root.join(name), vec![5_u8; 200 * 1024]).expect("file");
+        }
+        let events: Arc<Mutex<Vec<Progress>>> = Arc::default();
+        let sink = events.clone();
+        let operations = Operations::default();
+        let ctl = operations
+            .begin(Some(Box::new(move |progress| {
+                sink.lock().unwrap().push(progress)
+            })))
+            .expect("begin");
+        let found = find_duplicates_ctl(&root.display().to_string(), false, &ctl).expect("scan");
+        assert_eq!(found.items.len(), 1);
+        let seen = events.lock().unwrap().clone();
+        let phases: Vec<&str> = seen.iter().map(|event| event.phase).collect();
+        assert!(
+            phases.contains(&"scan") || phases.contains(&"quick"),
+            "{phases:?}"
+        );
+        let last_hash = seen
+            .iter()
+            .rev()
+            .find(|event| event.phase == "hash")
+            .expect("a hash event");
+        assert_eq!(
+            last_hash.done, last_hash.total,
+            "the final update reports completion"
+        );
+        assert_eq!(
+            last_hash.total,
+            2 * 200 * 1024,
+            "bytes to hash = the two candidate files"
+        );
     }
 }
