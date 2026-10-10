@@ -1464,6 +1464,7 @@ fn remove_empty_dirs(dirs: &[PathBuf]) {
     }
 }
 
+#[cfg(test)]
 pub fn undo_plan(plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
     undo_plan_only(plan, None)
 }
