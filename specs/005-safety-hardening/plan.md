@@ -193,3 +193,4 @@
 - D7 완료(Undo 빈 폴더 정리) 및 기록 카드 문구 정리(`N개 이동 · N개 되돌림`, 전부 되돌린 경우 `N개 모두 되돌림`).
 - **B2 완료**: 선택한 루트와 직접 지정한 삭제 경로는 `canonicalize`로 실제 경로를 풀어 검사(8.3 짧은 이름·정션·심볼릭 링크 우회 차단). 드라이브 루트, 사용자 프로필(및 그 상위), `\.Bin`, `System Volume Information` 거부. `Recovery`/`boot` 등은 Windows 드라이브에서만. 보호 환경 폴더는 `APPDATA`/`LOCALAPPDATA`/`SystemRoot`/`ProgramFiles`/`ProgramData` 기준. 수만 개 파일을 도는 스캔 루프는 기존의 가벼운 검사를 유지.
 - 알려진 한계: 폴더 안의 정션을 WalkDir이 따라 들어갈 수 있음(이 경우 정션 대상이 보호 경로여도 파일 단위 검사는 원래 철자만 봄). B1에서 실행 직전 재검증이 이를 보완.
+- **B3 완료**: 프로젝트 감지를 점수 방식으로 변경. `.git`/`.hg`/`.svn`은 단독으로 프로젝트, `package.json` 등 매니페스트는 2개 이상이거나 `src`·`lib`·`node_modules` 같은 소스 폴더와 함께일 때만 프로젝트. `.sln`/`.csproj`/`Gemfile`/`pubspec.yaml`/`Makefile`/`deno.json` 추가. 다운로드 폴더의 낱개 `package.json`은 더 이상 정리를 막지 않음. 스캔은 폴더별 결과를 캐시.

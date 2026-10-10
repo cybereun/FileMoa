@@ -9,8 +9,12 @@ use std::{
 };
 use walkdir::{DirEntry, WalkDir};
 
-const PROJECT_MARKERS: &[&str] = &[
-    ".git",
+/// One of these alone means "this folder is a repository".
+const STRONG_PROJECT_MARKERS: &[&str] = &[".git", ".hg", ".svn"];
+
+/// Build/manifest files. A single one is common in a Downloads folder, so it
+/// only counts together with a second marker or a source folder.
+const PROJECT_FILE_MARKERS: &[&str] = &[
     "package.json",
     "requirements.txt",
     "pyproject.toml",
@@ -20,6 +24,24 @@ const PROJECT_MARKERS: &[&str] = &[
     "composer.json",
     "go.mod",
     "cmakelists.txt",
+    "gemfile",
+    "pubspec.yaml",
+    "deno.json",
+    "makefile",
+];
+
+/// Project files recognised by extension (Visual Studio and friends).
+const PROJECT_EXTENSIONS: &[&str] = &["sln", "csproj", "vbproj", "fsproj"];
+
+/// Folders that, next to one manifest file, make a project certain.
+const PROJECT_SOURCE_DIRS: &[&str] = &[
+    "src",
+    "lib",
+    "node_modules",
+    "target",
+    "venv",
+    ".venv",
+    "vendor",
 ];
 
 const TEMP_SUFFIXES: &[&str] = &[".crdownload", ".part", ".tmp", ".download"];
@@ -430,9 +452,56 @@ pub(crate) fn root_rejection(root: &Path) -> Option<&'static str> {
 }
 
 fn project(path: &Path) -> bool {
-    PROJECT_MARKERS
+    if STRONG_PROJECT_MARKERS
         .iter()
         .any(|marker| path.join(marker).exists())
+    {
+        return true;
+    }
+    let mut markers = PROJECT_FILE_MARKERS
+        .iter()
+        .filter(|marker| path.join(marker).exists())
+        .count();
+    if markers < 2 {
+        // Directory listing is the expensive part; only needed when undecided.
+        markers += fs::read_dir(path)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| {
+                        entry
+                            .path()
+                            .extension()
+                            .and_then(|extension| extension.to_str())
+                            .is_some_and(|extension| {
+                                PROJECT_EXTENSIONS
+                                    .iter()
+                                    .any(|known| extension.eq_ignore_ascii_case(known))
+                            })
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+    }
+    markers >= 2
+        || (markers == 1
+            && PROJECT_SOURCE_DIRS
+                .iter()
+                .any(|name| path.join(name).is_dir()))
+}
+
+/// `project()` memoised per folder, because a scan asks about the same
+/// ancestors for every file beneath them.
+#[derive(Default)]
+struct ProjectCache(HashMap<PathBuf, bool>);
+
+impl ProjectCache {
+    fn is_project(&mut self, dir: &Path) -> bool {
+        *self
+            .0
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| project(dir))
+    }
 }
 
 pub(crate) fn sanitize_category(value: &str, language: &str) -> String {
@@ -777,6 +846,7 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
     let mut exclusions = Vec::new();
     let mut errors = Vec::new();
     let mut reserved_destinations = HashSet::new();
+    let mut projects = ProjectCache::default();
     let warnings = root_warnings(&root);
     let walker = if req.include_subfolders {
         WalkDir::new(&root).min_depth(1)
@@ -793,7 +863,7 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
         };
         let path = entry.path();
         if entry.file_type().is_dir() {
-            if path != root && project(path) {
+            if path != root && projects.is_project(path) {
                 exclusions.push(format!(
                     "개발 프로젝트 보호 / Project protected: {}",
                     path.display()
@@ -804,11 +874,9 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
         if !entry.file_type().is_file() {
             continue;
         }
-        if path
-            .ancestors()
-            .skip(1)
-            .any(|parent| parent != root && path_is_under(parent, &root) && project(parent))
-        {
+        if path.ancestors().skip(1).any(|parent| {
+            parent != root && path_is_under(parent, &root) && projects.is_project(parent)
+        }) {
             continue;
         }
         if category_roots
@@ -1759,5 +1827,70 @@ mod tests {
             "{short:?} must resolve to {long:?}"
         );
         assert!(root_rejection(&short).is_some());
+    }
+
+    fn touch(dir: &Path, name: &str) {
+        fs::create_dir_all(dir).expect("dir");
+        fs::write(dir.join(name), b"x").expect("file");
+    }
+
+    #[test]
+    fn one_stray_manifest_is_not_a_project() {
+        let directory = tempdir().expect("temp directory");
+        for lone in ["package.json", "requirements.txt", "Makefile", "app.sln"] {
+            let dir = directory.path().join(lone.replace('.', "_"));
+            touch(&dir, lone);
+            assert!(!project(&dir), "{lone} alone must not protect the folder");
+        }
+    }
+
+    #[test]
+    fn repositories_and_real_projects_are_detected() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        fs::create_dir_all(root.join("repo").join(".git")).expect("git");
+        assert!(project(&root.join("repo")), "a .git folder");
+        fs::create_dir_all(root.join("svn").join(".svn")).expect("svn");
+        assert!(project(&root.join("svn")), "a .svn folder");
+
+        touch(&root.join("two"), "package.json");
+        touch(&root.join("two"), "requirements.txt");
+        assert!(project(&root.join("two")), "two manifests");
+
+        touch(&root.join("withsrc"), "go.mod");
+        fs::create_dir_all(root.join("withsrc").join("src")).expect("src");
+        assert!(project(&root.join("withsrc")), "a manifest plus src");
+
+        touch(&root.join("vs"), "app.sln");
+        touch(&root.join("vs"), "app.csproj");
+        assert!(project(&root.join("vs")), "solution plus project file");
+    }
+
+    #[test]
+    fn a_stray_package_json_no_longer_blocks_organising_the_folder() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        fs::write(root.join("package.json"), b"{}").expect("manifest");
+        fs::write(root.join("photo.png"), b"png").expect("photo");
+        // A real project below the root is still left alone.
+        touch(&root.join("app"), "package.json");
+        touch(&root.join("app"), "requirements.txt");
+        fs::write(root.join("app").join("notes.txt"), b"keep").expect("inside project");
+
+        let mut req = request(root);
+        req.include_subfolders = true;
+        let plan = create_plan(req).expect("plan");
+        let moved: Vec<String> = plan
+            .actions
+            .iter()
+            .map(|action| action.source_path.clone())
+            .collect();
+        assert!(moved.iter().any(|path| path.ends_with("photo.png")));
+        assert!(moved.iter().any(|path| path.ends_with("package.json")));
+        assert!(
+            !moved.iter().any(|path| path.contains("app")),
+            "files inside the real project stay put: {moved:?}"
+        );
+        assert!(plan.exclusions.iter().any(|note| note.contains("app")));
     }
 }
