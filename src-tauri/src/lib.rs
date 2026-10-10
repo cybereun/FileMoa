@@ -307,8 +307,44 @@ fn recycle_files(
     })
 }
 
+/// Logical size to open the window with: the design size, but never more than
+/// the usable part of the screen (so a laptop does not push it off-screen).
+fn start_size(work_width: f64, work_height: f64) -> (f64, f64) {
+    const DESIGN: (f64, f64) = (1200.0, 960.0);
+    const MIN: (f64, f64) = (940.0, 620.0);
+    // Room for the title bar, the window border and a little air around it.
+    let width = DESIGN.0.min(work_width - 48.0).max(MIN.0);
+    let height = DESIGN.1.min(work_height - 80.0).max(MIN.1);
+    (width, height)
+}
+
+/// Shrink the window to the screen it opens on when the design size does not
+/// fit; on a large screen nothing changes.
+fn fit_window_to_screen(window: &tauri::WebviewWindow) {
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else { return };
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area();
+    let (width, height) = start_size(
+        f64::from(area.size.width) / scale,
+        f64::from(area.size.height) / scale,
+    );
+    let _ = window.set_size(tauri::LogicalSize::new(width, height));
+    let _ = window.center();
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                fit_window_to_screen(&window);
+            }
+            Ok(())
+        })
         .manage(PlanStore::default())
         .manage(ScanStore::default())
         .manage(Operations::default())
@@ -369,5 +405,17 @@ mod tests {
     fn shell_parser_rejects_missing_path_argument() {
         let args = vec![OsString::from("--organize")].into_iter();
         assert!(startup_candidate(args).is_err());
+    }
+
+    #[test]
+    fn the_window_opens_at_the_design_size_unless_the_screen_is_smaller() {
+        use super::start_size;
+        // A large work area: the design size, untouched.
+        assert_eq!(start_size(2560.0, 1400.0), (1200.0, 960.0));
+        assert_eq!(start_size(1920.0, 1040.0), (1200.0, 960.0));
+        // A laptop: as tall as fits, still wide enough.
+        assert_eq!(start_size(1366.0, 728.0), (1200.0, 648.0));
+        // A tiny or odd work area never goes below the minimum window.
+        assert_eq!(start_size(800.0, 600.0), (940.0, 620.0));
     }
 }
