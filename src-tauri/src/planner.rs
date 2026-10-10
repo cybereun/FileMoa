@@ -800,6 +800,57 @@ pub fn create_multi_plan(requests: Vec<PlanRequest>) -> Result<OrganizationPlan,
     })
 }
 
+/// Move `from` to `to` and fail with `AlreadyExists` instead of replacing a
+/// file that is already there. The check and the move are one OS call, so a
+/// file that appears between planning and moving (cloud sync, a finished
+/// download) can never be overwritten. `std::fs::rename` replaces on Windows.
+#[cfg(windows)]
+fn move_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    let wide = |path: &Path| -> Vec<u16> { path.as_os_str().encode_wide().chain([0]).collect() };
+    let (from, to) = (wide(from), wide(to));
+    // Flags 0: no MOVEFILE_REPLACE_EXISTING, no copy fallback across volumes.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn move_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    // hard_link refuses to replace an existing destination.
+    fs::hard_link(from, to)?;
+    fs::remove_file(from)
+}
+
+/// Move without overwriting, picking the next free `name (n).ext` when the
+/// destination turns out to be taken. Returns the final path and whether a
+/// rename was needed.
+fn move_with_unique_name(from: &Path, destination: PathBuf) -> io::Result<(PathBuf, bool)> {
+    let mut destination = destination;
+    let mut renamed = false;
+    for _ in 0..100 {
+        match move_no_replace(from, &destination) {
+            Ok(()) => return Ok((destination, renamed)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let (next, _) = safe_destination(destination.clone());
+                if next == destination {
+                    return Err(error);
+                }
+                destination = next;
+                renamed = true;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free destination name",
+    ))
+}
+
 /// Run the plan and report every action whose state changed through
 /// `on_action` right after it is settled, so callers can journal progress
 /// before the next file is touched. If `on_action` fails, no further file is
@@ -840,16 +891,10 @@ fn run_action(plan: &mut OrganizationPlan, index: usize) {
         action.reason = "원본 파일이 없어 건너뜀 / source no longer exists".into();
         return;
     }
-    let mut destination = PathBuf::from(&action.destination_path);
+    let destination = PathBuf::from(&action.destination_path);
     if path_key(&from_path) == path_key(&destination) {
         action.status = "skipped".into();
         return;
-    }
-    if destination.exists() {
-        let (safe, collision) = safe_destination(destination.clone());
-        destination = safe;
-        action.collision = action.collision || collision;
-        action.destination_path = destination.display().to_string();
     }
     if let Some(parent) = destination.parent() {
         if let Err(error) = fs::create_dir_all(parent) {
@@ -861,8 +906,9 @@ fn run_action(plan: &mut OrganizationPlan, index: usize) {
             return;
         }
     }
-    match fs::rename(&from_path, &destination) {
-        Ok(_) => {
+    match move_with_unique_name(&from_path, destination) {
+        Ok((destination, collision)) => {
+            action.collision = action.collision || collision;
             action.destination_path = destination.display().to_string();
             action.status = "executed".into();
         }
@@ -907,8 +953,16 @@ pub fn undo_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String>
                 continue;
             }
         }
-        match fs::rename(&from, &to) {
-            Ok(_) => action.status = "undone".into(),
+        match move_no_replace(&from, &to) {
+            Ok(()) => action.status = "undone".into(),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                // A file appeared at the original path after the check above.
+                action.status = "undo_conflict".into();
+                action.reason =
+                    "원래 위치에 새 파일이 있어 덮어쓰지 않음 / original path has a newer file"
+                        .into();
+                plan.errors.push(format!("Undo conflict: {}", to.display()));
+            }
             Err(error) => {
                 action.status = "undo_failed".into();
                 action.reason = format!("복원 실패 / restore failed: {error}");
@@ -1230,5 +1284,77 @@ mod tests {
         assert_eq!(result.actions[0].status, "undo_conflict");
         assert_eq!(fs::read(&original).unwrap(), b"newer");
         assert!(moved.exists());
+    }
+
+    #[test]
+    fn move_no_replace_never_overwrites_an_existing_file() {
+        let directory = tempdir().expect("temp directory");
+        let from = directory.path().join("from.txt");
+        let to = directory.path().join("to.txt");
+        fs::write(&from, b"incoming").expect("from");
+        fs::write(&to, b"existing").expect("to");
+        let error = move_no_replace(&from, &to).expect_err("must refuse");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&from).unwrap(), b"incoming");
+        assert_eq!(fs::read(&to).unwrap(), b"existing");
+
+        let free = directory.path().join("free.txt");
+        move_no_replace(&from, &free).expect("move to a free name");
+        assert!(!from.exists());
+        assert_eq!(fs::read(&free).unwrap(), b"incoming");
+    }
+
+    #[test]
+    fn move_with_unique_name_numbers_a_taken_destination() {
+        let directory = tempdir().expect("temp directory");
+        let from = directory.path().join("from.txt");
+        let taken = directory.path().join("a.txt");
+        fs::write(&from, b"incoming").expect("from");
+        fs::write(&taken, b"existing").expect("taken");
+        let (moved, renamed) = move_with_unique_name(&from, taken.clone()).expect("move");
+        assert!(renamed);
+        assert_eq!(moved, directory.path().join("a (1).txt"));
+        assert_eq!(fs::read(&taken).unwrap(), b"existing");
+        assert_eq!(fs::read(&moved).unwrap(), b"incoming");
+    }
+
+    #[test]
+    fn execute_keeps_a_file_that_appeared_after_planning() {
+        let directory = tempdir().expect("temp directory");
+        let source = directory.path().join("a.txt");
+        let destination = directory.path().join("문서").join("a.txt");
+        fs::write(&source, b"incoming").expect("source");
+        let plan = OrganizationPlan {
+            root_path: directory.path().display().to_string(),
+            actions: vec![PlannedAction {
+                source_path: source.display().to_string(),
+                destination_path: destination.display().to_string(),
+                category: "문서".into(),
+                reason: "test".into(),
+                status: "proposed".into(),
+                size_bytes: 8,
+                modified_unix_secs: None,
+                collision: false,
+            }],
+            exclusions: Vec::new(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            created_at: Utc::now().to_rfc3339(),
+            basis: "type".into(),
+            language: "ko".into(),
+            mode: "safe".into(),
+            root_paths: vec![directory.path().display().to_string()],
+            run_id: String::new(),
+        };
+        // The file shows up after the preview was built, before execution.
+        fs::create_dir_all(destination.parent().unwrap()).expect("category");
+        fs::write(&destination, b"arrived later").expect("late file");
+        let done = execute_plan_with(plan, |_, _| Ok(())).expect("execute");
+        assert_eq!(done.actions[0].status, "executed");
+        assert!(done.actions[0].collision);
+        assert_eq!(fs::read(&destination).unwrap(), b"arrived later");
+        let renamed = PathBuf::from(&done.actions[0].destination_path);
+        assert_ne!(renamed, destination);
+        assert_eq!(fs::read(&renamed).unwrap(), b"incoming");
     }
 }
