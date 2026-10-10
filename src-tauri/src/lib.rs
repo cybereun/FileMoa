@@ -165,8 +165,22 @@ fn find_empty_folders(root_path: String, include_subfolders: bool) -> Result<Vec
 }
 
 #[tauri::command]
-fn recycle_files(paths: Vec<String>) -> Result<Vec<String>, String> {
-    recycle::recycle_files(paths)
+fn recycle_files(
+    window: tauri::WebviewWindow,
+    paths: Vec<String>,
+) -> Result<recycle::RecycleOutcome, String> {
+    // The shell's "permanent delete" warning needs an owner window to appear on top.
+    #[cfg(windows)]
+    let owner = window
+        .hwnd()
+        .map(|handle| handle.0 as windows_sys::Win32::Foundation::HWND)
+        .unwrap_or(std::ptr::null_mut());
+    #[cfg(not(windows))]
+    let owner = {
+        let _ = &window;
+        std::ptr::null_mut()
+    };
+    recycle::recycle_files(paths, owner)
 }
 
 pub fn run() {

@@ -426,12 +426,17 @@ export default function App() {
     if (!confirmed) return;
     setBusy(true);
     try {
-      const moved = await invoke<string[]>('recycle_files', { paths: pathsToRecycle });
+      const outcome = await invoke<{ recycled: string[]; skipped: { path: string; reason: string }[] }>('recycle_files', { paths: pathsToRecycle });
+      const moved = outcome.recycled;
       setDuplicateSelection((previous) => previous.filter((item) => !moved.includes(item)));
       setCleanupSelection((previous) => previous.filter((item) => !moved.includes(item)));
       setDuplicates((previous) => previous.map((group) => ({ ...group, filePaths: group.filePaths.filter((item) => !moved.includes(item)), reclaimableBytes: group.sizeBytes * Math.max(0, group.filePaths.filter((item) => !moved.includes(item)).length - 1) })).filter((group) => group.filePaths.length > 1));
       setEmptyFolders((previous) => previous.filter((item) => !moved.includes(item)));
-      setNotice(lang === 'ko' ? `${moved.length}개 항목을 휴지통으로 보냈습니다.` : `${moved.length} item(s) moved to the Recycle Bin.`);
+      const skippedCount = outcome.skipped.length;
+      const firstReason = skippedCount ? outcome.skipped[0].reason : '';
+      setNotice(lang === 'ko'
+        ? `${moved.length}개 항목을 휴지통으로 보냈습니다.${skippedCount ? ` ${skippedCount}개는 삭제하지 않았습니다: ${firstReason}` : ''}`
+        : `${moved.length} item(s) moved to the Recycle Bin.${skippedCount ? ` ${skippedCount} item(s) were not deleted: ${firstReason}` : ''}`);
     } catch (error) {
       setNotice(String(error));
     } finally {
