@@ -40,7 +40,7 @@ import {
 } from 'lucide-react';
 import appIcon from './assets/app-icon.png';
 import './styles.css';
-import { basename, cloudOnlyNotice as cloudOnlyMessage, formatBytes, isCancelledError, progressPercent, providerStatus, requestCount, runTitle as runTitleText, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
+import { basename, cloudOnlyNotice as cloudOnlyMessage, duplicateGroupTitle, formatBytes, isCancelledError, planSummary, progressPercent, providerStatus, requestCount, runTitle as runTitleText, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
 
 type Category = { name: string; extensions: string[]; enabled: boolean };
 type KeywordRule = { keyword: string; category: string; caseSensitive?: boolean };
@@ -897,7 +897,7 @@ export default function App() {
         {panel === 'plan' && <>
           <h2>{t.plan}</h2>
           {plan ? <>
-            <p>{total} files · {plan.exclusions.length} exclusions · {plan.errors.length} errors{plan.warnings?.length ? ` · ${plan.warnings.length} warnings` : ''}</p>
+            <p>{planSummary({ files: total, exclusions: plan.exclusions.length, errors: plan.errors.length, warnings: plan.warnings?.length ?? 0 }, lang)}</p>
             {plan.warnings && plan.warnings.length > 0 && <details className="plan-details warning-details" open><summary>{t.warnings} ({plan.warnings.length})</summary>{plan.warnings.map((item, index) => <p key={`${item}-${index}`}>{item}</p>)}</details>}
             <div className="table"><div className="row table-heading"><b>{t.category}</b><span>{lang === 'ko' ? '현재 위치' : 'Current path'}</span><span>{lang === 'ko' ? '이동 위치' : 'Destination'}</span><small>{t.status}</small></div>{plan.actions.map((action, index) => <div className={`row ${action.status !== 'proposed' ? `action-${action.status}` : ''}`} key={`${action.sourcePath}-${index}`}><b>{action.category}</b><span title={action.sourcePath}>{action.sourcePath}</span><span title={action.destinationPath}>→ {action.destinationPath}{action.collision && <em className="collision-badge">{t.collision}</em>}</span><small>{action.reason} · {action.status === 'proposed' ? (lang === 'ko' ? '이동 예정' : 'Pending') : action.status}</small></div>)}</div>
             {plan.exclusions.length > 0 && <details className="plan-details"><summary>{lang === 'ko' ? '제외된 항목' : 'Excluded items'} ({plan.exclusions.length})</summary>{plan.exclusions.map((item, index) => <p key={`${item}-${index}`}>{item}</p>)}</details>}
@@ -920,7 +920,7 @@ export default function App() {
 
         {panel === 'duplicates' && <>
           <h2>{t.duplicates}</h2><p>{lang === 'ko' ? '완전히 동일한 파일만 표시합니다. 선택한 파일은 확인 후 휴지통으로 보낼 수 있습니다.' : 'Only byte-identical files are shown. Selected files can be moved to the Recycle Bin after confirmation.'}</p>
-          {scanPanel === 'duplicates' ? <Loading text={t.scanning} /> : duplicates.length ? <>{duplicates.map((group, index) => <div className="card" key={`${group.hash}-${index}`}><b>{group.filePaths.length} files · {(group.reclaimableBytes / 1024 / 1024).toFixed(1)} MB</b><span className="muted">SHA-256: {group.hash}</span>{group.filePaths.map((filePath, fileIndex) => <label className="check-row" key={filePath}><input type="checkbox" checked={duplicateSelection.includes(filePath)} onChange={() => setDuplicateSelection((previous) => previous.includes(filePath) ? previous.filter((item) => item !== filePath) : [...previous, filePath])} />{fileIndex === 0 ? (lang === 'ko' ? '보존 권장: ' : 'Keep recommended: ') : ''}{filePath}</label>)}</div>)}<button className="secondary-action" onClick={() => void recycleSelected(duplicateSelection)} disabled={busy || !duplicateSelection.length}><Trash2 size={15} /> {t.recycle} ({duplicateSelection.length})</button></> : <Empty text={t.nothing} />}
+          {scanPanel === 'duplicates' ? <Loading text={t.scanning} /> : duplicates.length ? <>{duplicates.map((group, index) => <div className="card" key={`${group.hash}-${index}`}><b>{duplicateGroupTitle(group.filePaths.length, group.reclaimableBytes, lang)}</b><span className="muted">SHA-256: {group.hash}</span>{group.filePaths.map((filePath, fileIndex) => <label className="check-row" key={filePath}><input type="checkbox" checked={duplicateSelection.includes(filePath)} onChange={() => setDuplicateSelection((previous) => previous.includes(filePath) ? previous.filter((item) => item !== filePath) : [...previous, filePath])} />{fileIndex === 0 ? (lang === 'ko' ? '보존 권장: ' : 'Keep recommended: ') : ''}{filePath}</label>)}</div>)}<button className="secondary-action" onClick={() => void recycleSelected(duplicateSelection)} disabled={busy || !duplicateSelection.length}><Trash2 size={15} /> {t.recycle} ({duplicateSelection.length})</button></> : <Empty text={t.nothing} />}
         </>}
 
         {panel === 'large' && <>

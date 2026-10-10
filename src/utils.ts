@@ -68,3 +68,22 @@ export function progressPercent(done: number, total: number): number | null {
   if (!(total > 0)) return null;
   return Math.min(100, Math.round((done / total) * 100));
 }
+
+export type PlanCounts = { files: number; exclusions: number; errors: number; warnings: number };
+
+/** One line under the plan heading, in the UI language. */
+export function planSummary(counts: PlanCounts, language: Language): string {
+  const { files, exclusions, errors, warnings } = counts;
+  if (language === 'ko') {
+    return `${files}개 파일 · 제외 ${exclusions}개 · 오류 ${errors}개${warnings ? ` · 주의 ${warnings}개` : ''}`;
+  }
+  return `${files} files · ${exclusions} exclusions · ${errors} errors${warnings ? ` · ${warnings} warnings` : ''}`;
+}
+
+/** Title of a group of identical files: how many there are and what removing the extras would save. */
+export function duplicateGroupTitle(fileCount: number, reclaimableBytes: number, language: Language): string {
+  const megabytes = (reclaimableBytes / 1024 / 1024).toFixed(1);
+  return language === 'ko'
+    ? `${fileCount}개 파일 · ${megabytes} MB 절약 가능`
+    : `${fileCount} files · ${megabytes} MB reclaimable`;
+}

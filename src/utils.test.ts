@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { basename, cloudOnlyNotice, formatBytes, isCancelledError, progressPercent, providerStatus, requestCount, runTitle, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
+import { basename, cloudOnlyNotice, duplicateGroupTitle, planSummary, formatBytes, isCancelledError, progressPercent, providerStatus, requestCount, runTitle, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
 
 describe('FileMoa UI utilities', () => {
   it('formats byte counts for the large-file view', () => {
@@ -65,5 +65,18 @@ describe('FileMoa UI utilities', () => {
     expect(progressPercent(50, 200)).toBe(25);
     expect(progressPercent(300, 200)).toBe(100);
     expect(progressPercent(0, 10)).toBe(0);
+  });
+
+  it('writes the plan summary in the UI language', () => {
+    const counts = { files: 420, exclusions: 2, errors: 0, warnings: 0 };
+    expect(planSummary(counts, 'ko')).toBe('420개 파일 · 제외 2개 · 오류 0개');
+    expect(planSummary(counts, 'en')).toBe('420 files · 2 exclusions · 0 errors');
+    expect(planSummary({ ...counts, warnings: 3 }, 'ko')).toBe('420개 파일 · 제외 2개 · 오류 0개 · 주의 3개');
+    expect(planSummary({ ...counts, warnings: 3 }, 'en')).toBe('420 files · 2 exclusions · 0 errors · 3 warnings');
+  });
+
+  it('titles a duplicate group with the space the extra copies take', () => {
+    expect(duplicateGroupTitle(3, 8 * 1024 * 1024, 'ko')).toBe('3개 파일 · 8.0 MB 절약 가능');
+    expect(duplicateGroupTitle(3, 8 * 1024 * 1024, 'en')).toBe('3 files · 8.0 MB reclaimable');
   });
 });

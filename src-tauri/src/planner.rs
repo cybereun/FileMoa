@@ -613,7 +613,11 @@ fn extension(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
-fn keyword_category(path: &Path, rules: &[KeywordRule]) -> Option<(String, String)> {
+fn keyword_category(
+    path: &Path,
+    rules: &[KeywordRule],
+    language: &str,
+) -> Option<(String, String)> {
     let file_name = path.file_name()?.to_string_lossy();
     rules.iter().find_map(|rule| {
         let keyword = rule.keyword.trim();
@@ -630,7 +634,11 @@ fn keyword_category(path: &Path, rules: &[KeywordRule]) -> Option<(String, Strin
         matched.then(|| {
             (
                 rule.category.clone(),
-                format!("Filename contains '{keyword}'"),
+                if is_english(language) {
+                    format!("Filename contains '{keyword}'")
+                } else {
+                    format!("파일명에 '{keyword}' 포함")
+                },
             )
         })
     })
@@ -738,7 +746,7 @@ fn size_category(size: u64, language: &str) -> String {
 }
 
 fn category_for(path: &Path, metadata: &fs::Metadata, req: &PlanRequest) -> (String, String) {
-    if let Some((category, reason)) = keyword_category(path, &req.keyword_rules) {
+    if let Some((category, reason)) = keyword_category(path, &req.keyword_rules, &req.language) {
         return (sanitize_category(&category, &req.language), reason);
     }
     let mut date_missing = false;
@@ -1457,15 +1465,20 @@ pub fn undo_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String>
         if !from.exists() {
             action.status = "undo_missing".into();
             action.reason = "되돌릴 대상이 없어 건너뜀 / destination no longer exists".into();
-            plan.errors
-                .push(format!("Undo missing: {}", from.display()));
+            plan.errors.push(format!(
+                "되돌릴 파일이 없습니다 / Undo missing: {}",
+                from.display()
+            ));
             continue;
         }
         if to.exists() {
             action.status = "undo_conflict".into();
             action.reason =
                 "원래 위치에 새 파일이 있어 덮어쓰지 않음 / original path has a newer file".into();
-            plan.errors.push(format!("Undo conflict: {}", to.display()));
+            plan.errors.push(format!(
+                "원래 위치에 새 파일이 있어 덮어쓰지 않습니다 / Undo conflict: {}",
+                to.display()
+            ));
             continue;
         }
         if let Some(parent) = to.parent() {
@@ -1486,7 +1499,10 @@ pub fn undo_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String>
                 action.reason =
                     "원래 위치에 새 파일이 있어 덮어쓰지 않음 / original path has a newer file"
                         .into();
-                plan.errors.push(format!("Undo conflict: {}", to.display()));
+                plan.errors.push(format!(
+                    "원래 위치에 새 파일이 있어 덮어쓰지 않습니다 / Undo conflict: {}",
+                    to.display()
+                ));
             }
             Err(error) => {
                 action.status = "undo_failed".into();
@@ -2694,5 +2710,23 @@ mod tests {
         }
         let warnings = root_warnings(Path::new(r"C:\Users\a\OneDrive - 대구광역시교육청\문서"));
         assert!(warnings.iter().any(|w| w.contains("클라우드")));
+    }
+
+    #[test]
+    fn filename_keyword_reasons_follow_the_ui_language() {
+        let directory = tempdir().expect("temp directory");
+        fs::write(directory.path().join("invoice-march.pdf"), b"x").expect("file");
+        let mut req = request(directory.path());
+        req.keyword_rules = vec![KeywordRule {
+            keyword: "invoice".into(),
+            category: "Billing".into(),
+            case_sensitive: false,
+        }];
+        let korean = create_plan(req.clone()).expect("plan");
+        assert_eq!(korean.actions[0].reason, "파일명에 'invoice' 포함");
+        let mut english = req;
+        english.language = "en".into();
+        let english = create_plan(english).expect("plan");
+        assert_eq!(english.actions[0].reason, "Filename contains 'invoice'");
     }
 }
