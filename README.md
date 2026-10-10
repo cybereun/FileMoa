@@ -11,12 +11,19 @@ FileMoa는 Windows에서 선택한 폴더를 안전하게 정리하는 한국어
 - PDF, Word, Excel, PowerPoint, HWP/HWPX, 텍스트, 전자책, 이미지·스크린샷,
   동영상, 오디오, 압축파일, 설치파일, 개발파일, 폰트, 디스크 이미지, 데이터,
   기타 분류
-- 파일 형식·생성/수정/접근 날짜(년-월·년-월-일)·연도·크기·파일명 IF→THEN 기준
-- 사용자 카테고리와 확장자, 숨김 파일/예외 설정, 개발 프로젝트 보호
+- 파일 형식·생성/수정/접근 날짜(년-월·년-월-일)·연도·크기·파일명(가나다·ABC)·파일명 키워드 IF→THEN 기준
+- 사용자 카테고리와 확장자, 숨김 파일/예외 설정, 개발 프로젝트 보호(`.git` 등 저장소는 단독으로, `package.json` 같은 파일은 둘 이상이거나 소스 폴더와 함께일 때)
 - 충돌 시 `(1)`, `(2)`를 붙이는 Dry Run 미리보기와 오류/제외 목록
-- 파일 이동, 실행 기록(최근 30일), 충돌 없는 Undo 미리보기
-- 크기 선필터 후 전체 SHA-256 중복 탐색, 사용자 지정 크기의 대용량 파일·빈 폴더 후보 탐색
-- 선택한 항목을 Windows Recycle Bin으로 보내는 명시적 확인 작업
+- 파일 이동, 실행 기록(최근 30일), 충돌 없는 Undo 미리보기. 이동마다 저널에 기록해
+  앱이 도중에 종료돼도 다음 실행에서 복구하고 되돌릴 수 있으며, Undo는 이번 실행이
+  만든 빈 폴더도 정리합니다.
+- 큰 폴더에서도 창이 멈추지 않는 백그라운드 실행, 진행률 표시와 취소(정리 실행은
+  지금 옮기는 파일까지만 마치고 멈추며 되돌릴 수 있음)
+- 크기 → 앞 64KB → 전체 SHA-256 순서의 중복 탐색(병렬), 사용자 지정 크기의
+  대용량 파일·빈 폴더 후보 탐색. OneDrive/Drive의 온라인 전용 파일은 내려받지 않도록 제외
+- 검사 결과에 있던 항목만 Windows Recycle Bin으로 보내는 명시적 확인 작업.
+  중복 그룹의 마지막 복사본은 지울 수 없고, 휴지통이 없는 네트워크·이동식 드라이브의
+  항목은 영구 삭제되지 않도록 거부합니다.
 - OpenAI, Anthropic Claude, Google Gemini API, localhost Ollama를 매 실행마다
   선택하는 AI 추천. AI는 파일명(베이스네임)·확장자·크기·시간만 전송하고 파일
   내용/전체 경로를 보내지 않으며, 제안은 사용자가 승인한 뒤 미리보기에 반영됩니다.
@@ -30,10 +37,13 @@ FileMoa는 Windows에서 선택한 폴더를 안전하게 정리하는 한국어
 ## 로컬 실행
 
 ```powershell
-Set-Location F:\Codex-F\smartfile
+Set-Location <저장소 폴더>
 npm ci
 npm run tauri dev
 ```
+
+Google Drive·OneDrive처럼 동기화되는 폴더에서는 `npm ci`와 Rust 빌드가 파일 잠금으로
+실패할 수 있으니 로컬 디스크의 폴더에서 작업하세요.
 
 ## 검증
 
@@ -41,12 +51,17 @@ npm run tauri dev
 npm test -- --run
 npm run build
 cargo fmt --manifest-path src-tauri\Cargo.toml -- --check
-cargo check --manifest-path src-tauri\Cargo.toml -j1 --lib
+cargo clippy --manifest-path src-tauri\Cargo.toml --lib --tests -- -D warnings
+cargo test --manifest-path src-tauri\Cargo.toml
 ```
 
-Windows 러스트 테스트는 Tauri의 대형 `windows` 의존성을 컴파일하므로 메모리가
-작은 환경에서는 `-j1`로 실행하는 것을 권장합니다. `cargo check`와 프런트엔드
-테스트/빌드는 릴리즈 전 필수 확인 항목입니다.
+`.github/workflows/ci.yml`이 `main`을 제외한 모든 브랜치와 풀 리퀘스트에서 같은 검사를
+실행합니다. 메모리가 작은 환경에서는 Rust 명령에 `-j1`을 붙이세요. 휴지통에 실제
+파일 하나를 보내는 통합 테스트는 기본 제외이며
+`cargo test --lib -- --ignored recycles_a_real_file`로 따로 실행합니다.
+
+수동 확인 항목(영구 삭제 경고, 실제 클라우드 폴더, 앱 두 개 동시 실행)은
+`specs/005-safety-hardening/beta-test.md`에 정리되어 있습니다.
 
 ## NSIS 설치 파일
 
@@ -74,11 +89,16 @@ NSIS 실행 파일 패치 단계에서 최신 툴체인과의 호환 문제가 �
 ## GitHub Releases 자동 업데이트
 
 `.github/workflows/release.yml`은 `main`에 커밋이 푸시되거나 `v*` 태그가 올라오면
-Windows NSIS와 Tauri 업데이트 서명 아티팩트를 빌드해 버전별 GitHub Release에
-자동 업로드합니다. `package.json`, `src-tauri/tauri.conf.json`,
-`src-tauri/Cargo.toml`의 버전이 일치해야 하며, 버전을 올리면 새 릴리즈가 생성되고
-같은 버전의 추가 푸시는 해당 릴리즈 아티팩트를 갱신합니다. 업로더는 다음 비밀을
-필요로 합니다.
+테스트를 실행하고, **그 버전(`v<version>`)의 릴리즈가 아직 없을 때만** Windows NSIS와
+Tauri 업데이트 서명 아티팩트를 빌드해 GitHub Release로 올립니다. 배포하려면
+`package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`의 버전을 같이
+올린 커밋을 푸시하세요. 같은 버전으로 다시 푸시하면 검사만 통과시키고 이미 배포된
+설치 파일과 `latest.json`을 덮어쓰지 않습니다(수동 실행의 `force` 옵션으로만 재배포).
+
+`0.2.0-beta.1`처럼 하이픈이 있는 버전은 **사전 릴리즈**로 올라갑니다. 업데이터가 따르는
+`latest` 릴리즈에는 포함되지 않으므로 기존 사용자에게 자동 업데이트되지 않고, 설치 파일을
+직접 내려받아 쓰는 사람만 받습니다. 정식 버전(`0.2.0`)을 올리면 모든 사용자에게 업데이트가
+제공됩니다. 업로더는 다음 비밀을 필요로 합니다.
 
 - `TAURI_SIGNING_PRIVATE_KEY`
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (키에 비밀번호를 설정한 경우)
@@ -97,6 +117,16 @@ Ollama는 `127.0.0.1:11434`만 확인하고 설치된 모델을 자동 다운로
 
 ## 보안 원칙
 
-시스템 폴더, AppData, 개발 프로젝트(`.git`, `package.json`, `Cargo.toml` 등),
-임시 다운로드와 숨김 파일은 기본 제외합니다. 덮어쓰기와 영구 삭제는 사용하지
-않고, 오류와 충돌은 계획/기록에 남깁니다.
+시스템 폴더, AppData, 개발 프로젝트, 임시 다운로드와 숨김 파일은 기본 제외하고, 드라이브
+루트·사용자 폴더 전체·휴지통 폴더는 정리 대상으로 선택할 수 없습니다(8.3 짧은 이름이나
+링크로 우회해도 실제 경로로 풀어 검사). 덮어쓰기와 영구 삭제는 사용하지 않고, 오류와
+충돌은 계획/기록에 남깁니다.
+
+- 화면은 경로를 보내지 않습니다. 정리 계획은 백엔드가 보관하고 화면은 계획 ID만, 되돌리기는
+  실행 기록 ID만 보냅니다. 실행 직전에 모든 항목이 선택한 폴더 안인지, 보호 경로가 아닌지,
+  미리보기 이후 바뀌지 않았는지 다시 확인합니다.
+- 휴지통 작업은 검사 결과에 있던 항목에만, 검사 이후 바뀌지 않았을 때만 허용합니다.
+- AI에는 파일명(베이스네임)·확장자·크기·시간만 보내고, 파일명을 지시문이 아닌 데이터로
+  취급하도록 프롬프트에 명시합니다. 제안은 사용자가 승인해야 반영되며 새 카테고리는 실행당
+  12개로 제한합니다. Gemini 키는 URL이 아니라 헤더로 보내고, 저장된 키는 DPAPI에 앱 고유
+  엔트로피를 더해 암호화합니다.
