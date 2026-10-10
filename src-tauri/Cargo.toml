@@ -1,6 +1,6 @@
 [package]
 name = "filemoa"
-version = "0.2.0"
+version = "0.2.1"
 description = "Safe local file organization for Windows"
 authors = ["FileMoa"]
 edition = "2021"
