@@ -121,6 +121,9 @@ pub struct OrganizationPlan {
     pub mode: String,
     #[serde(default)]
     pub root_paths: Vec<String>,
+    /// Identifies the persisted run record/journal; empty until execution starts.
+    #[serde(default)]
+    pub run_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -663,7 +666,7 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
         if path
             .ancestors()
             .skip(1)
-            .any(|parent| parent != root && project(parent))
+            .any(|parent| parent != root && path_is_under(parent, &root) && project(parent))
         {
             continue;
         }
@@ -744,6 +747,7 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
         language: req.language,
         mode: req.mode,
         root_paths: vec![root.display().to_string()],
+        run_id: String::new(),
     })
 }
 
@@ -792,56 +796,83 @@ pub fn create_multi_plan(requests: Vec<PlanRequest>) -> Result<OrganizationPlan,
         language,
         mode,
         root_paths,
+        run_id: String::new(),
     })
 }
 
-pub fn execute_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
+/// Run the plan and report every action whose state changed through
+/// `on_action` right after it is settled, so callers can journal progress
+/// before the next file is touched. If `on_action` fails, no further file is
+/// moved: the remaining proposed actions are skipped and the error recorded.
+pub fn execute_plan_with<F>(
+    mut plan: OrganizationPlan,
+    mut on_action: F,
+) -> Result<OrganizationPlan, String>
+where
+    F: FnMut(usize, &PlannedAction) -> Result<(), String>,
+{
     for index in 0..plan.actions.len() {
-        let action = &mut plan.actions[index];
-        if action.status != "proposed" {
+        if plan.actions[index].status != "proposed" {
             continue;
         }
-        let from_path = PathBuf::from(&action.source_path);
-        if !from_path.is_file() {
-            action.status = "skipped".into();
-            action.reason = "원본 파일이 없어 건너뜀 / source no longer exists".into();
-            continue;
-        }
-        let mut destination = PathBuf::from(&action.destination_path);
-        if path_key(&from_path) == path_key(&destination) {
-            action.status = "skipped".into();
-            continue;
-        }
-        if destination.exists() {
-            let (safe, collision) = safe_destination(destination.clone());
-            destination = safe;
-            action.collision = action.collision || collision;
-            action.destination_path = destination.display().to_string();
-        }
-        if let Some(parent) = destination.parent() {
-            if let Err(error) = fs::create_dir_all(parent) {
-                action.status = "failed".into();
-                action.reason =
-                    format!("폴더를 만들 수 없습니다 / cannot create destination folder: {error}");
-                plan.errors
-                    .push(format!("{}: {}", from_path.display(), action.reason));
-                continue;
+        run_action(&mut plan, index);
+        if let Err(error) = on_action(index, &plan.actions[index]) {
+            plan.errors.push(error);
+            for action in &mut plan.actions[index + 1..] {
+                if action.status == "proposed" {
+                    action.status = "skipped".into();
+                    action.reason =
+                        "기록을 쓸 수 없어 중단됨 / stopped: the run record could not be written"
+                            .into();
+                }
             }
-        }
-        match fs::rename(&from_path, &destination) {
-            Ok(_) => {
-                action.destination_path = destination.display().to_string();
-                action.status = "executed".into();
-            }
-            Err(error) => {
-                action.status = "failed".into();
-                action.reason = format!("이동 실패 / move failed: {error}");
-                plan.errors
-                    .push(format!("{}: {}", from_path.display(), action.reason));
-            }
+            break;
         }
     }
     Ok(plan)
+}
+
+fn run_action(plan: &mut OrganizationPlan, index: usize) {
+    let action = &mut plan.actions[index];
+    let from_path = PathBuf::from(&action.source_path);
+    if !from_path.is_file() {
+        action.status = "skipped".into();
+        action.reason = "원본 파일이 없어 건너뜀 / source no longer exists".into();
+        return;
+    }
+    let mut destination = PathBuf::from(&action.destination_path);
+    if path_key(&from_path) == path_key(&destination) {
+        action.status = "skipped".into();
+        return;
+    }
+    if destination.exists() {
+        let (safe, collision) = safe_destination(destination.clone());
+        destination = safe;
+        action.collision = action.collision || collision;
+        action.destination_path = destination.display().to_string();
+    }
+    if let Some(parent) = destination.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            action.status = "failed".into();
+            action.reason =
+                format!("폴더를 만들 수 없습니다 / cannot create destination folder: {error}");
+            plan.errors
+                .push(format!("{}: {}", from_path.display(), action.reason));
+            return;
+        }
+    }
+    match fs::rename(&from_path, &destination) {
+        Ok(_) => {
+            action.destination_path = destination.display().to_string();
+            action.status = "executed".into();
+        }
+        Err(error) => {
+            action.status = "failed".into();
+            action.reason = format!("이동 실패 / move failed: {error}");
+            plan.errors
+                .push(format!("{}: {}", from_path.display(), action.reason));
+        }
+    }
 }
 
 pub fn undo_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
@@ -1030,7 +1061,16 @@ pub fn find_empty_folders(root: &str, sub: bool) -> Result<Vec<String>, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+
+    /// The system temp folder lives under %LOCALAPPDATA%, which the planner
+    /// rightly refuses to organize. Keep test folders inside the build tree.
+    fn tempdir() -> io::Result<tempfile::TempDir> {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp");
+        fs::create_dir_all(&base)?;
+        tempfile::Builder::new().tempdir_in(base)
+    }
 
     fn request(root: &Path) -> PlanRequest {
         PlanRequest {
@@ -1184,6 +1224,7 @@ mod tests {
             language: "ko".into(),
             mode: "safe".into(),
             root_paths: vec![directory.path().display().to_string()],
+            run_id: String::new(),
         };
         let result = undo_plan(plan).expect("undo");
         assert_eq!(result.actions[0].status, "undo_conflict");

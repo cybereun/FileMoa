@@ -50,6 +50,7 @@ type Plan = {
   language?: string;
   mode?: string;
   rootPaths?: string[];
+  runId?: string;
 };
 type Duplicate = {
   hash: string;
@@ -596,6 +597,17 @@ export default function App() {
           setPath(initialPath);
           setPanel('plan');
         }
+      })
+      .catch((error) => setNotice(String(error)));
+    void invoke<Plan[]>('recover_interrupted_runs')
+      .then((recovered) => {
+        if (!recovered.length) return;
+        setRuns((previous) => [...recovered, ...previous].slice(0, 100));
+        const moved = recovered.reduce((sum, run) => sum + run.actions.filter((action) => action.status === 'executed').length, 0);
+        setPanel('history');
+        setNotice(lang === 'ko'
+          ? `이전 정리가 중단되었습니다. 이동된 ${moved}개 파일이 기록에 복구되었습니다. 정리 기록에서 확인하거나 되돌릴 수 있습니다.`
+          : `A previous organization was interrupted. ${moved} moved files were recovered into the history, where you can review or undo them.`);
       })
       .catch((error) => setNotice(String(error)));
     // Startup checks are silent: they only set the update badge/notice.

@@ -1,4 +1,5 @@
 mod ai;
+mod journal;
 mod planner;
 mod recycle;
 
@@ -86,9 +87,28 @@ fn plan_multiple_organizations(requests: Vec<PlanRequest>) -> Result<Organizatio
     planner::create_multi_plan(requests)
 }
 
+fn runs_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join("runs"))
+        .map_err(|e| {
+            format!("앱 데이터 경로를 확인할 수 없습니다 / app data path unavailable: {e}")
+        })
+}
+
 #[tauri::command]
-fn execute_organization(plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
-    planner::execute_plan(plan)
+fn execute_organization(
+    app: AppHandle,
+    plan: OrganizationPlan,
+) -> Result<OrganizationPlan, String> {
+    journal::execute_with_journal(&runs_dir(&app)?, plan)
+}
+
+/// Runs that were still in progress when the app last stopped, with every
+/// journaled move applied so they can be reviewed or undone.
+#[tauri::command]
+fn recover_interrupted_runs(app: AppHandle) -> Result<Vec<OrganizationPlan>, String> {
+    journal::recover(&runs_dir(&app)?)
 }
 
 #[tauri::command]
@@ -135,6 +155,7 @@ pub fn run() {
             plan_organization,
             plan_multiple_organizations,
             execute_organization,
+            recover_interrupted_runs,
             undo_organization,
             find_duplicates,
             find_large_files,
