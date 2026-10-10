@@ -42,7 +42,7 @@ import {
 } from 'lucide-react';
 import appIcon from './assets/app-icon.png';
 import './styles.css';
-import { basename, cloudOnlyNotice as cloudOnlyMessage, decideOpenFolder, duplicateGroupTitle, formatBytes, isCancelledError, planSummary, progressPercent, providerStatus, requestCount, runTitle as runTitleText, shouldOpenUpdateModal, shouldUseStartupPath, type OpenFolderRequest } from './utils';
+import { basename, chooseKeeper, cloudOnlyNotice as cloudOnlyMessage, decideOpenFolder, dirname, duplicateGroupTitle, formatBytes, formatDay, selectForRecycle, type KeepCriterion, isCancelledError, planSummary, progressPercent, providerStatus, requestCount, runTitle as runTitleText, shouldOpenUpdateModal, shouldUseStartupPath, type OpenFolderRequest } from './utils';
 
 type Category = { name: string; extensions: string[]; enabled: boolean };
 type KeywordRule = { keyword: string; category: string; caseSensitive?: boolean };
@@ -88,6 +88,7 @@ type Duplicate = {
   hash: string;
   sizeBytes: number;
   filePaths: string[];
+  modifiedSecs: number[];
   reclaimableBytes: number;
 };
 type LargeFile = { path: string; sizeBytes: number };
@@ -215,6 +216,9 @@ export default function App() {
   const [excludedExtensions, setExcludedExtensions] = useState<string[]>(() => readLocal('filemoa-excluded-extensions', []));
   const [duplicates, setDuplicates] = useState<Duplicate[]>([]);
   const [duplicateSelection, setDuplicateSelection] = useState<string[]>([]);
+  const [keepCriterion, setKeepCriterion] = useState<KeepCriterion>('oldest');
+  const [keepFolder, setKeepFolder] = useState('');
+  const [keepApplied, setKeepApplied] = useState(false);
   const [largeFiles, setLargeFiles] = useState<LargeFile[]>([]);
   const [emptyFolders, setEmptyFolders] = useState<string[]>([]);
   const [cleanupSelection, setCleanupSelection] = useState<string[]>([]);
@@ -264,6 +268,24 @@ export default function App() {
     () => plan?.actions.filter((action, index) => action.status === 'proposed' && !unchecked.has(index)).length ?? 0,
     [plan, unchecked],
   );
+  const keepFolders = [...new Set(duplicates.flatMap((group) => group.filePaths.map(dirname)))].sort();
+  const groupFiles = (group: Duplicate) => group.filePaths.map((filePath, at) => ({ path: filePath, modifiedSecs: group.modifiedSecs[at] ?? 0 }));
+  const criterionLabels: Record<KeepCriterion, [string, string]> = {
+    oldest: ['가장 오래된 것', 'Oldest'],
+    newest: ['가장 최근 것', 'Newest'],
+    'shortest-path': ['경로가 가장 짧은 것', 'Shortest path'],
+    'simplest-name': ['이름이 가장 단순한 것', 'Simplest name'],
+    folder: ['지정한 폴더', 'Chosen folder'],
+  };
+  const keepNeedsFolder = keepCriterion === 'folder' && !keepFolder;
+  function applyKeepCriterion() {
+    if (keepNeedsFolder) return;
+    const { paths } = selectForRecycle(duplicates.map(groupFiles), keepCriterion, keepFolder);
+    setDuplicateSelection(paths);
+    setKeepApplied(true);
+  }
+  const duplicateSavedBytes = duplicates.reduce((sum, group) => sum + group.sizeBytes * group.filePaths.filter((item) => duplicateSelection.includes(item)).length, 0);
+
   // Read by the listener below, which is registered once and must see current values.
   const outside = useRef({ busy: false, hasPreview: false, lang });
   outside.current = { busy, hasPreview: pendingCount > 0, lang };
@@ -464,6 +486,7 @@ export default function App() {
     setScanPanel('duplicates');
     setDuplicates([]);
     setDuplicateSelection([]);
+    setKeepApplied(false);
     setNotice('');
     setBusy(true);
     try {
@@ -547,7 +570,7 @@ export default function App() {
       const moved = outcome.recycled;
       setDuplicateSelection((previous) => previous.filter((item) => !moved.includes(item)));
       setCleanupSelection((previous) => previous.filter((item) => !moved.includes(item)));
-      setDuplicates((previous) => previous.map((group) => ({ ...group, filePaths: group.filePaths.filter((item) => !moved.includes(item)), reclaimableBytes: group.sizeBytes * Math.max(0, group.filePaths.filter((item) => !moved.includes(item)).length - 1) })).filter((group) => group.filePaths.length > 1));
+      setDuplicates((previous) => previous.map((group) => { const left = group.filePaths.map((item, at) => ({ item, secs: group.modifiedSecs[at] ?? 0 })).filter((entry) => !moved.includes(entry.item)); return { ...group, filePaths: left.map((entry) => entry.item), modifiedSecs: left.map((entry) => entry.secs), reclaimableBytes: group.sizeBytes * Math.max(0, left.length - 1) }; }).filter((group) => group.filePaths.length > 1));
       setEmptyFolders((previous) => previous.filter((item) => !moved.includes(item)));
       const skippedCount = outcome.skipped.length;
       const firstReason = skippedCount ? outcome.skipped[0].reason : '';
@@ -1015,7 +1038,45 @@ export default function App() {
 
         {panel === 'duplicates' && <>
           <h2>{t.duplicates}</h2><p>{lang === 'ko' ? '완전히 동일한 파일만 표시합니다. 선택한 파일은 확인 후 휴지통으로 보낼 수 있습니다.' : 'Only byte-identical files are shown. Selected files can be moved to the Recycle Bin after confirmation.'}</p>
-          {scanPanel === 'duplicates' ? <Loading text={t.scanning} /> : duplicates.length ? <>{duplicates.map((group, index) => <div className="card" key={`${group.hash}-${index}`}><b>{duplicateGroupTitle(group.filePaths.length, group.reclaimableBytes, lang)}</b><span className="muted">SHA-256: {group.hash}</span>{group.filePaths.map((filePath, fileIndex) => <label className="check-row" key={filePath}><input type="checkbox" checked={duplicateSelection.includes(filePath)} onChange={() => setDuplicateSelection((previous) => previous.includes(filePath) ? previous.filter((item) => item !== filePath) : [...previous, filePath])} />{fileIndex === 0 ? (lang === 'ko' ? '보존 권장: ' : 'Keep recommended: ') : ''}{filePath}</label>)}</div>)}<button className="secondary-action" onClick={() => void recycleSelected(duplicateSelection)} disabled={busy || !duplicateSelection.length}><Trash2 size={15} /> {t.recycle} ({duplicateSelection.length})</button></> : <Empty text={t.nothing} />}
+          {scanPanel === 'duplicates' ? <Loading text={t.scanning} /> : duplicates.length ? <>
+            <div className="keep-bar">
+              <label className="keep-field">{lang === 'ko' ? '남길 기준' : 'Keep'}
+                <select value={keepCriterion} onChange={(event) => { setKeepCriterion(event.target.value as KeepCriterion); setKeepApplied(false); }}>
+                  {(Object.keys(criterionLabels) as KeepCriterion[]).map((key) => <option key={key} value={key}>{criterionLabels[key][lang === 'ko' ? 0 : 1]}</option>)}
+                </select>
+              </label>
+              {keepCriterion === 'folder' && <label className="keep-field">{lang === 'ko' ? '폴더' : 'Folder'}
+                <select value={keepFolder} onChange={(event) => { setKeepFolder(event.target.value); setKeepApplied(false); }}>
+                  <option value="">{lang === 'ko' ? '폴더 선택…' : 'Choose a folder…'}</option>
+                  {keepFolders.map((folder) => <option key={folder} value={folder}>{folder}</option>)}
+                </select>
+              </label>}
+              <button className="secondary-action" onClick={applyKeepCriterion} disabled={busy || keepNeedsFolder}>{lang === 'ko' ? '선택 적용' : 'Apply'}</button>
+              <span className="keep-sum">{lang === 'ko' ? `${duplicateSelection.length}개 선택 · ${(duplicateSavedBytes / 1024 / 1024).toFixed(1)} MB 절약` : `${duplicateSelection.length} selected · ${(duplicateSavedBytes / 1024 / 1024).toFixed(1)} MB saved`}</span>
+              <span className="keep-spacer" />
+              <button className="secondary-action danger-action" onClick={() => void recycleSelected(duplicateSelection)} disabled={busy || !duplicateSelection.length}><Trash2 size={15} /> {t.recycle} ({duplicateSelection.length})</button>
+            </div>
+            <div className="keep-note">{lang === 'ko' ? '각 그룹의 파일 1개는 항상 남습니다 · 휴지통으로 보낸 파일은 Windows 휴지통에서 복원할 수 있습니다' : 'One file of each group always stays · Files sent to the Recycle Bin can be restored from Windows'}</div>
+            {duplicates.map((group, index) => {
+              const files = groupFiles(group);
+              const choice = keepApplied && !keepNeedsFolder ? chooseKeeper(files, keepCriterion, keepFolder) : null;
+              return <div className="card keep-group" key={`${group.hash}-${index}`}>
+                <div className="keep-head"><b>{duplicateGroupTitle(group.filePaths.length, group.reclaimableBytes, lang)}</b><span className="muted">SHA-256 {group.hash.slice(0, 8)}…{group.hash.slice(-4)}</span></div>
+                {files.map((file) => {
+                  const remove = duplicateSelection.includes(file.path);
+                  const dir = dirname(file.path);
+                  return <label className={`keep-row ${remove ? 'remove' : 'keep'}`} key={file.path}>
+                    <input type="checkbox" checked={remove} onChange={() => setDuplicateSelection((previous) => previous.includes(file.path) ? previous.filter((item) => item !== file.path) : [...previous, file.path])} />
+                    <span className="keep-path" title={file.path}><span className="keep-dir">{dir}{dir ? '\\' : ''}</span><b>{basename(file.path)}</b></span>
+                    <span className="keep-meta">{lang === 'ko' ? '수정' : 'Modified'} {formatDay(file.modifiedSecs)} · {formatBytes(group.sizeBytes)}</span>
+                    <span className={`keep-badge ${remove ? 'remove' : 'keep'}`}>{remove ? (lang === 'ko' ? '삭제 예정' : 'To delete') : (lang === 'ko' ? '보존' : 'Keep')}</span>
+                  </label>;
+                })}
+                {choice?.tie && <div className="keep-tie"><i>{lang === 'ko' ? '확인 필요' : 'Check'}</i>{lang === 'ko' ? '수정 날짜가 같아 경로 순서로 정했습니다. 보존할 파일을 직접 골라 주세요.' : 'The criterion could not tell these apart, so path order was used. Please pick the file to keep yourself.'}</div>}
+              </div>;
+            })}
+            <button className="secondary-action danger-action" onClick={() => void recycleSelected(duplicateSelection)} disabled={busy || !duplicateSelection.length}><Trash2 size={15} /> {t.recycle} ({duplicateSelection.length})</button>
+          </> : <Empty text={t.nothing} />}
         </>}
 
         {panel === 'large' && <>

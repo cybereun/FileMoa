@@ -102,3 +102,70 @@ export function decideOpenFolder(request: OpenFolderRequest, state: { busy: bool
   if (state.busy) return 'busy';
   return state.hasPreview ? 'confirm' : 'open';
 }
+
+export type KeepCriterion = 'oldest' | 'newest' | 'shortest-path' | 'simplest-name' | 'folder';
+export type KeepFile = { path: string; modifiedSecs: number };
+export type KeepChoice = { keep: string; tie: boolean };
+
+const COPY_MARKS = /(\s*-\s*copy(\s*\(\d+\))?|\s*\(\d+\)|\s*복사본(\s*\(\d+\))?|^copy of\s+)/gi;
+
+/** Lower is simpler: a name carrying "복사본", "- Copy" or "(1)" is the likelier extra. */
+export function nameComplexity(path: string): number {
+  const name = basename(path);
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  return (stem.match(COPY_MARKS)?.length ?? 0) * 1000 + stem.length;
+}
+
+function sameFolder(path: string, folder: string): boolean {
+  const normal = (value: string) => value.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+  return normal(path).startsWith(`${normal(folder)}\\`);
+}
+
+/** Folder part of a path, without the file name. */
+export function dirname(path: string): string {
+  const index = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
+  return index > 0 ? path.slice(0, index) : '';
+}
+
+/**
+ * The copy of one group to keep. `tie` is true when the criterion could not tell
+ * the best copies apart, so the user should look at the group; the pick is then
+ * the first path in alphabetical order. Always returns a member of the group.
+ */
+export function chooseKeeper(files: KeepFile[], criterion: KeepCriterion, folder = ''): KeepChoice {
+  const ordered = [...files].sort((a, b) => a.path.localeCompare(b.path));
+  const score = (file: KeepFile): number => {
+    switch (criterion) {
+      case 'oldest': return file.modifiedSecs;
+      case 'newest': return -file.modifiedSecs;
+      case 'shortest-path': return file.path.length;
+      case 'simplest-name': return nameComplexity(file.path);
+      case 'folder': return sameFolder(file.path, folder) ? 0 : 1;
+    }
+  };
+  const best = Math.min(...ordered.map(score));
+  const winners = ordered.filter((file) => score(file) === best);
+  return { keep: winners[0].path, tie: winners.length > 1 };
+}
+
+/** Files to recycle for every group, keeping the chosen copy of each. */
+export function selectForRecycle(groups: KeepFile[][], criterion: KeepCriterion, folder = ''): { paths: string[]; tieGroups: number[] } {
+  const paths: string[] = [];
+  const tieGroups: number[] = [];
+  groups.forEach((files, index) => {
+    if (files.length < 2) return;
+    const { keep, tie } = chooseKeeper(files, criterion, folder);
+    if (tie) tieGroups.push(index);
+    for (const file of files) if (file.path !== keep) paths.push(file.path);
+  });
+  return { paths, tieGroups };
+}
+
+/** YYYY-MM-DD of a Unix time, in local time. */
+export function formatDay(secs: number): string {
+  if (!secs) return '-';
+  const date = new Date(secs * 1000);
+  const two = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}`;
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { basename, cloudOnlyNotice, decideOpenFolder, duplicateGroupTitle, planSummary, formatBytes, isCancelledError, progressPercent, providerStatus, requestCount, runTitle, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
+import { basename, chooseKeeper, selectForRecycle, nameComplexity, cloudOnlyNotice, decideOpenFolder, duplicateGroupTitle, planSummary, formatBytes, isCancelledError, progressPercent, providerStatus, requestCount, runTitle, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
 
 describe('FileMoa UI utilities', () => {
   it('formats byte counts for the large-file view', () => {
@@ -90,5 +90,27 @@ describe('FileMoa UI utilities', () => {
     // A running operation wins over everything else about the window.
     expect(decideOpenFolder({ path: 'C:\\Photos' }, { busy: true, hasPreview: true })).toBe('busy');
     expect(decideOpenFolder({ path: 'C:\\Photos' }, { busy: true, hasPreview: false })).toBe('busy');
+  });
+
+  it('chooses which copy of a duplicate group to keep', () => {
+    const a = { path: 'C:\\docs\\a.pdf', modifiedSecs: 100 };
+    const b = { path: 'C:\\downloads\\old\\a (1).pdf', modifiedSecs: 200 };
+    const c = { path: 'C:\\downloads\\a - Copy.pdf', modifiedSecs: 300 };
+    expect(chooseKeeper([b, c, a], 'oldest')).toEqual({ keep: a.path, tie: false });
+    expect(chooseKeeper([a, b, c], 'newest')).toEqual({ keep: c.path, tie: false });
+    expect(chooseKeeper([a, b, c], 'shortest-path').keep).toBe(a.path);
+    expect(chooseKeeper([b, c, a], 'simplest-name').keep).toBe(a.path);
+    expect(chooseKeeper([a, b, c], 'folder', 'C:\\downloads\\').keep).toBe(c.path);
+    expect(chooseKeeper([a, b, c], 'folder', 'C:\\downloads\\').tie).toBe(true);
+    expect(chooseKeeper([a, { ...b, modifiedSecs: 100 }], 'oldest')).toEqual({ keep: a.path, tie: true });
+    expect(nameComplexity('x\\보고서 복사본.hwp')).toBeGreaterThan(nameComplexity('x\\보고서.hwp'));
+  });
+
+  it('selects everything except one copy per group', () => {
+    const g1 = [{ path: 'a1', modifiedSecs: 1 }, { path: 'a2', modifiedSecs: 2 }, { path: 'a3', modifiedSecs: 3 }];
+    const g2 = [{ path: 'b1', modifiedSecs: 5 }, { path: 'b2', modifiedSecs: 5 }];
+    const { paths, tieGroups } = selectForRecycle([g1, g2], 'oldest');
+    expect(paths).toEqual(['a2', 'a3', 'b2']);
+    expect(tieGroups).toEqual([1]);
   });
 });

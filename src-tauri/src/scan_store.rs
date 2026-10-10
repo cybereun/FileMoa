@@ -252,6 +252,7 @@ mod tests {
             hash: "h".into(),
             size_bytes: 4,
             file_paths: paths.iter().map(|p| p.display().to_string()).collect(),
+            modified_secs: Vec::new(),
             reclaimable_bytes: 4,
         }
     }

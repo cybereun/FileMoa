@@ -162,6 +162,8 @@ pub struct DuplicateGroup {
     pub hash: String,
     pub size_bytes: u64,
     pub file_paths: Vec<String>,
+    /// Modified time (Unix seconds) of each entry of `file_paths`, same order.
+    pub modified_secs: Vec<u64>,
     pub reclaimable_bytes: u64,
 }
 
@@ -1736,6 +1738,7 @@ pub fn find_duplicates_ctl(
                 hash: hash.clone(),
                 size_bytes: *size,
                 reclaimable_bytes: size.saturating_mul(files.len() as u64 - 1),
+                modified_secs: Vec::new(),
                 file_paths: files
                     .iter()
                     .map(|path| path.display().to_string())
@@ -1772,6 +1775,7 @@ pub fn find_duplicates_ctl(
                 hash,
                 size_bytes: size,
                 reclaimable_bytes: size.saturating_mul(paths.len() as u64 - 1),
+                modified_secs: Vec::new(),
                 file_paths: paths,
             });
         }
@@ -1785,6 +1789,16 @@ pub fn find_duplicates_ctl(
     });
     for group in &mut groups {
         group.file_paths.sort();
+        group.modified_secs = group
+            .file_paths
+            .iter()
+            .map(|path| {
+                fs::metadata(path)
+                    .ok()
+                    .and_then(|metadata| modified_secs(&metadata))
+                    .unwrap_or(0)
+            })
+            .collect();
     }
     Ok(ScanResult {
         items: groups,
@@ -2528,6 +2542,20 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(run(), run(), "threads must not change the order of results");
+    }
+
+    #[test]
+    fn duplicate_groups_report_each_files_modified_time() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        fs::write(root.join("a.txt"), b"same").expect("a");
+        fs::write(root.join("b.txt"), b"same").expect("b");
+        let groups = find_duplicates(&root.display().to_string(), false)
+            .expect("scan")
+            .items;
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].modified_secs.len(), groups[0].file_paths.len());
+        assert!(groups[0].modified_secs.iter().all(|secs| *secs > 0));
     }
 
     #[test]
