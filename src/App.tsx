@@ -20,9 +20,11 @@ import {
   FolderOpen,
   FolderTree,
   Folders,
+  HardDrive,
   History,
   Image as ImageIcon,
   Layers,
+  ListChecks,
   ListFilter,
   Monitor,
   Music,
@@ -1005,7 +1007,7 @@ export default function App() {
 
       <section className="workspace">
         {panel === 'plan' && <>
-          <h2>{t.plan}</h2>
+          <div className="manage-head"><ListChecks size={20} aria-hidden="true" /><h2>{t.plan}</h2></div>
           {plan ? <>
             <p>{planSummary({ files: total, exclusions: plan.exclusions.length, errors: plan.errors.length, warnings: plan.warnings?.length ?? 0 }, lang)}{pendingCount > 0 && <strong className="selection-count"> · {lang === 'ko' ? `이동 선택 ${selectedCount}/${pendingCount}개` : `${selectedCount}/${pendingCount} selected to move`}</strong>}</p>
             {plan.warnings && plan.warnings.length > 0 && <details className="plan-details warning-details" open><summary>{t.warnings} ({plan.warnings.length})</summary>{plan.warnings.map((item, index) => <p key={`${item}-${index}`}>{item}</p>)}</details>}
@@ -1037,7 +1039,7 @@ export default function App() {
         </div>}
 
         {panel === 'duplicates' && <>
-          <h2>{t.duplicates}</h2><p>{lang === 'ko' ? '완전히 동일한 파일만 표시합니다. 선택한 파일은 확인 후 휴지통으로 보낼 수 있습니다.' : 'Only byte-identical files are shown. Selected files can be moved to the Recycle Bin after confirmation.'}</p>
+          <div className="manage-head"><Copy size={20} aria-hidden="true" /><h2>{t.duplicates}</h2></div><p>{lang === 'ko' ? '완전히 동일한 파일만 표시합니다. 선택한 파일은 확인 후 휴지통으로 보낼 수 있습니다.' : 'Only byte-identical files are shown. Selected files can be moved to the Recycle Bin after confirmation.'}</p>
           {scanPanel === 'duplicates' ? <Loading text={t.scanning} /> : duplicates.length ? <>
             <div className="keep-bar">
               <label className="keep-field">{lang === 'ko' ? '남길 기준' : 'Keep'}
@@ -1080,22 +1082,22 @@ export default function App() {
         </>}
 
         {panel === 'large' && <>
-          <h2>{t.large}</h2><p>{t.largeHint}</p><label className="threshold-field">{t.largeThreshold}<input type="number" min="1" step="1" value={largeThresholdMb} onChange={(event) => setLargeThresholdMb(event.target.value)} /></label>
+          <div className="manage-head"><HardDrive size={20} aria-hidden="true" /><h2>{t.large}</h2></div><p>{t.largeHint}</p><label className="threshold-field">{t.largeThreshold}<input type="number" min="1" step="1" value={largeThresholdMb} onChange={(event) => setLargeThresholdMb(event.target.value)} /></label>
           {scanPanel === 'large' ? <Loading text={t.scanning} /> : largeFiles.length ? <div className="card-list">{largeFiles.map((file) => <div className="card compact-card" key={file.path}><b>{formatBytes(file.sizeBytes)}</b><span>{file.path}</span></div>)}</div> : <Empty text={t.nothing} />}
         </>}
 
         {panel === 'empty' && <>
-          <h2>{t.emptyFolders}</h2><p>{t.emptyHint}</p>
+          <div className="manage-head"><FolderOpen size={20} aria-hidden="true" /><h2>{t.emptyFolders}</h2></div><p>{t.emptyHint}</p>
           {scanPanel === 'empty' ? <Loading text={t.scanning} /> : emptyFolders.length ? <><div className="card-list">{emptyFolders.map((folder) => <label className="check-row card" key={folder}><input type="checkbox" checked={cleanupSelection.includes(folder)} onChange={() => setCleanupSelection((previous) => previous.includes(folder) ? previous.filter((item) => item !== folder) : [...previous, folder])} />{folder}</label>)}</div><button className="secondary-action" onClick={() => void recycleSelected(cleanupSelection)} disabled={busy || !cleanupSelection.length}><Trash2 size={15} /> {t.recycle} ({cleanupSelection.length})</button></> : <Empty text={t.nothing} />}
         </>}
 
         {panel === 'history' && <>
-          <h2>{t.history}</h2>
+          <div className="manage-head"><History size={20} aria-hidden="true" /><h2>{t.history}</h2></div>
           {runs.length ? runs.map((run) => <div className="card" key={run.runId}><b>{runTitle(run)}</b><span>{run.rootPath}</span><span className="muted">{run.updatedAt ? new Date(run.updatedAt).toLocaleString() : ''} · {lang === 'ko' ? `제외 ${run.exclusionCount}개 · 오류 ${run.errorCount}개` : `${run.exclusionCount} exclusions · ${run.errorCount} errors`}</span><div className="card-actions">{run.executedCount > 0 && <button onClick={() => void openUndoPreview(run.runId)} disabled={busy}>{t.undo}</button>}<button className="danger-action" onClick={() => void removeRun(run)} disabled={busy}><Trash2 size={14} />{lang === 'ko' ? '기록 삭제' : 'Delete'}</button></div></div>) : <Empty text={t.nothing} />}
         </>}
 
         {panel === 'ai' && <>
-          <div className="panel-heading"><div><h2>{t.aiTitle}</h2><p>{t.aiHint}</p></div><button className="icon-button" onClick={() => void refreshAiProviders()} disabled={busy} aria-label={t.retry}><RefreshCw size={18} /></button></div>
+          <div className="panel-heading"><div><div className="manage-head"><Bot size={20} aria-hidden="true" /><h2>{t.aiTitle}</h2></div><p>{t.aiHint}</p></div><button className="icon-button" onClick={() => void refreshAiProviders()} disabled={busy} aria-label={t.retry}><RefreshCw size={18} /></button></div>
           <div className="privacy-callout"><ShieldCheck size={19} /><span>{t.localOnly}</span></div>
           <h3>{t.selected}</h3>
           <div className="provider-grid">{aiProviders.map((provider) => <button className={`provider-card ${selectedAi === provider.id ? 'selected' : ''}`} key={provider.id} onClick={() => { setSelectedAi(provider.id); setAiKeyDraft(''); setAiModelOptions([]); }}><span className="provider-name"><Bot size={17} /> {provider.displayName}</span><span className="provider-state">{providerStatus(provider.id, provider.keyPresent, provider.available, lang)}</span></button>)}</div>
