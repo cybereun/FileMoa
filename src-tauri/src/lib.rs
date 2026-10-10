@@ -146,7 +146,7 @@ fn import_legacy_runs(app: AppHandle, runs: Vec<OrganizationPlan>) -> Result<usi
 fn find_duplicates(
     root_path: String,
     include_subfolders: bool,
-) -> Result<Vec<planner::DuplicateGroup>, String> {
+) -> Result<planner::ScanResult<planner::DuplicateGroup>, String> {
     planner::find_duplicates(&root_path, include_subfolders)
 }
 
@@ -155,7 +155,7 @@ fn find_large_files(
     root_path: String,
     include_subfolders: bool,
     minimum_size_bytes: u64,
-) -> Result<Vec<planner::LargeFile>, String> {
+) -> Result<planner::ScanResult<planner::LargeFile>, String> {
     planner::find_large_files(&root_path, include_subfolders, minimum_size_bytes)
 }
 

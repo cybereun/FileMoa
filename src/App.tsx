@@ -64,6 +64,7 @@ type RunSummary = {
   errorCount: number;
   exclusionCount: number;
 };
+type ScanResult<T> = { items: T[]; cloudOnlySkipped: number };
 type Duplicate = {
   hash: string;
   sizeBytes: number;
@@ -361,8 +362,11 @@ export default function App() {
     setNotice('');
     setBusy(true);
     try {
-      const results = (await Promise.all(roots.map((rootPath) => invoke<Duplicate[]>('find_duplicates', { rootPath, includeSubfolders: sub })))).flat();
-      if (requestId === scanRequestRef.current) setDuplicates(results);
+      const scans = await Promise.all(roots.map((rootPath) => invoke<ScanResult<Duplicate>>('find_duplicates', { rootPath, includeSubfolders: sub })));
+      if (requestId === scanRequestRef.current) {
+        setDuplicates(scans.flatMap((scan) => scan.items));
+        setNotice(cloudOnlyNotice(scans.reduce((sum, scan) => sum + scan.cloudOnlySkipped, 0)));
+      }
     } catch (error) {
       if (requestId === scanRequestRef.current) setNotice(String(error));
     } finally {
@@ -371,6 +375,13 @@ export default function App() {
         setBusy(false);
       }
     }
+  }
+
+  function cloudOnlyNotice(count: number): string {
+    if (!count) return '';
+    return lang === 'ko'
+      ? `클라우드 전용(온라인 전용) 파일 ${count}개는 다운로드를 막기 위해 검사에서 제외했습니다.`
+      : `${count} cloud-only file(s) were skipped so they are not downloaded.`;
   }
 
   async function scanLargeFiles() {
@@ -385,8 +396,11 @@ export default function App() {
     setBusy(true);
     try {
       const threshold = Math.max(1, Number(largeThresholdMb) || 100) * 1024 * 1024;
-      const results = (await Promise.all(roots.map((rootPath) => invoke<LargeFile[]>('find_large_files', { rootPath, includeSubfolders: sub, minimumSizeBytes: threshold })))).flat();
-      if (requestId === scanRequestRef.current) setLargeFiles(results);
+      const scans = await Promise.all(roots.map((rootPath) => invoke<ScanResult<LargeFile>>('find_large_files', { rootPath, includeSubfolders: sub, minimumSizeBytes: threshold })));
+      if (requestId === scanRequestRef.current) {
+        setLargeFiles(scans.flatMap((scan) => scan.items));
+        setNotice(cloudOnlyNotice(scans.reduce((sum, scan) => sum + scan.cloudOnlySkipped, 0)));
+      }
     } catch (error) {
       if (requestId === scanRequestRef.current) setNotice(String(error));
     } finally {

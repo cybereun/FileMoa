@@ -142,6 +142,44 @@ pub struct LargeFile {
     pub size_bytes: u64,
 }
 
+/// Scan output plus how many cloud-only files were left alone. Reading such a
+/// file (hashing) makes OneDrive/Drive download it, and listing it as "large"
+/// is misleading because it occupies no local space.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanResult<T> {
+    pub items: Vec<T>,
+    pub cloud_only_skipped: usize,
+}
+
+const FILE_ATTRIBUTE_OFFLINE: u32 = 0x1000;
+const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x4_0000;
+const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
+
+/// Placeholder/offline attributes set by cloud sync providers for files whose
+/// content is not stored locally.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn attributes_mean_cloud_only(attributes: u32) -> bool {
+    attributes
+        & (FILE_ATTRIBUTE_OFFLINE
+            | FILE_ATTRIBUTE_RECALL_ON_OPEN
+            | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+        != 0
+}
+
+fn is_cloud_only(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        attributes_mean_cloud_only(metadata.file_attributes())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
 fn is_english(language: &str) -> bool {
     language.eq_ignore_ascii_case("en")
 }
@@ -975,6 +1013,10 @@ pub fn undo_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String>
 }
 
 fn hash_file(path: &Path) -> io::Result<String> {
+    // Last line of defence: opening a placeholder for reading downloads it.
+    if is_cloud_only(&fs::metadata(path)?) {
+        return Err(io::Error::other("cloud-only file is not read"));
+    }
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     // Tauri IPC workers use relatively small stacks on Windows. Keep the
@@ -999,13 +1041,14 @@ fn scan_entries(root: &str, sub: bool) -> impl Iterator<Item = Result<DirEntry, 
     walk.into_iter()
 }
 
-pub fn find_duplicates(root: &str, sub: bool) -> Result<Vec<DuplicateGroup>, String> {
+pub fn find_duplicates(root: &str, sub: bool) -> Result<ScanResult<DuplicateGroup>, String> {
     if !Path::new(root).is_dir() {
         return Err(format!(
             "중복 파일을 찾을 폴더를 찾을 수 없습니다 / duplicate scan folder not found: {root}"
         ));
     }
     let mut sizes: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    let mut cloud_only_skipped = 0;
     for item in scan_entries(root, sub) {
         let entry = match item {
             Ok(entry) => entry,
@@ -1018,6 +1061,10 @@ pub fn find_duplicates(root: &str, sub: bool) -> Result<Vec<DuplicateGroup>, Str
             continue;
         }
         if let Ok(metadata) = entry.metadata() {
+            if is_cloud_only(&metadata) {
+                cloud_only_skipped += 1;
+                continue;
+            }
             sizes
                 .entry(metadata.len())
                 .or_default()
@@ -1050,15 +1097,19 @@ pub fn find_duplicates(root: &str, sub: bool) -> Result<Vec<DuplicateGroup>, Str
         }
     }
     groups.sort_by(|left, right| right.reclaimable_bytes.cmp(&left.reclaimable_bytes));
-    Ok(groups)
+    Ok(ScanResult {
+        items: groups,
+        cloud_only_skipped,
+    })
 }
 
 pub fn find_large_files(
     root: &str,
     sub: bool,
     minimum_size_bytes: u64,
-) -> Result<Vec<LargeFile>, String> {
+) -> Result<ScanResult<LargeFile>, String> {
     let mut files = Vec::new();
+    let mut cloud_only_skipped = 0;
     for item in scan_entries(root, sub) {
         let entry = match item {
             Ok(entry) => entry,
@@ -1071,6 +1122,10 @@ pub fn find_large_files(
             continue;
         }
         if let Ok(metadata) = entry.metadata() {
+            if is_cloud_only(&metadata) {
+                cloud_only_skipped += 1;
+                continue;
+            }
             if metadata.len() >= minimum_size_bytes {
                 files.push(LargeFile {
                     path: entry.path().display().to_string(),
@@ -1080,7 +1135,10 @@ pub fn find_large_files(
         }
     }
     files.sort_by(|left, right| right.size_bytes.cmp(&left.size_bytes));
-    Ok(files)
+    Ok(ScanResult {
+        items: files,
+        cloud_only_skipped,
+    })
 }
 
 pub fn find_empty_folders(root: &str, sub: bool) -> Result<Vec<String>, String> {
@@ -1199,7 +1257,9 @@ mod tests {
         let directory = tempdir().expect("temp directory");
         fs::write(directory.path().join("a.txt"), b"same").expect("a");
         fs::write(directory.path().join("b.txt"), b"same").expect("b");
-        let groups = find_duplicates(&directory.path().display().to_string(), false).expect("scan");
+        let groups = find_duplicates(&directory.path().display().to_string(), false)
+            .expect("scan")
+            .items;
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].file_paths.len(), 2);
         assert_eq!(groups[0].hash.len(), 64);
@@ -1356,5 +1416,55 @@ mod tests {
         let renamed = PathBuf::from(&done.actions[0].destination_path);
         assert_ne!(renamed, destination);
         assert_eq!(fs::read(&renamed).unwrap(), b"incoming");
+    }
+
+    #[test]
+    fn cloud_placeholder_attributes_are_recognised() {
+        assert!(attributes_mean_cloud_only(0x40_0000)); // RECALL_ON_DATA_ACCESS
+        assert!(attributes_mean_cloud_only(0x4_0000)); // RECALL_ON_OPEN
+        assert!(attributes_mean_cloud_only(0x1000 | 0x20)); // OFFLINE + ARCHIVE
+        assert!(!attributes_mean_cloud_only(0x20)); // ARCHIVE only
+        assert!(!attributes_mean_cloud_only(0));
+    }
+
+    #[cfg(windows)]
+    fn mark_offline(path: &Path) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::SetFileAttributesW;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        // FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_ARCHIVE
+        assert_ne!(
+            unsafe { SetFileAttributesW(wide.as_ptr(), 0x1000 | 0x20) },
+            0
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scans_leave_cloud_only_files_alone_and_count_them() {
+        let directory = tempdir().expect("temp directory");
+        let local_a = directory.path().join("local-a.bin");
+        let local_b = directory.path().join("local-b.bin");
+        let cloud_a = directory.path().join("cloud-a.bin");
+        let cloud_b = directory.path().join("cloud-b.bin");
+        for path in [&local_a, &local_b, &cloud_a, &cloud_b] {
+            fs::write(path, vec![9_u8; 4096]).expect("file");
+        }
+        mark_offline(&cloud_a);
+        mark_offline(&cloud_b);
+        let root = directory.path().display().to_string();
+
+        let duplicates = find_duplicates(&root, false).expect("duplicates");
+        assert_eq!(duplicates.cloud_only_skipped, 2);
+        assert_eq!(duplicates.items.len(), 1);
+        let paths = &duplicates.items[0].file_paths;
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().all(|path| path.contains("local-")));
+
+        let large = find_large_files(&root, false, 1024).expect("large");
+        assert_eq!(large.cloud_only_skipped, 2);
+        assert_eq!(large.items.len(), 2);
+        assert!(hash_file(&cloud_a).is_err());
+        assert!(hash_file(&local_a).is_ok());
     }
 }
