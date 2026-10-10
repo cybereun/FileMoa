@@ -2676,7 +2676,10 @@ mod tests {
             r"C:\Users\a\Google Drive\x",
             r"C:\Users\a\iCloudDrive\x",
         ] {
-            assert!(is_cloud_sync_folder(Path::new(yes)), "{yes} should count as a cloud folder");
+            assert!(
+                is_cloud_sync_folder(Path::new(yes)),
+                "{yes} should count as a cloud folder"
+            );
         }
         for no in [
             r"C:\Users\a\Documents\onedrive-notes",
@@ -2684,7 +2687,10 @@ mod tests {
             r"C:\Users\a\Downloads",
             r"D:\drive\mine",
         ] {
-            assert!(!is_cloud_sync_folder(Path::new(no)), "{no} is an ordinary folder");
+            assert!(
+                !is_cloud_sync_folder(Path::new(no)),
+                "{no} is an ordinary folder"
+            );
         }
         let warnings = root_warnings(Path::new(r"C:\Users\a\OneDrive - 대구광역시교육청\문서"));
         assert!(warnings.iter().any(|w| w.contains("클라우드")));
