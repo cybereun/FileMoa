@@ -151,14 +151,28 @@ async fn execute_organization(
     store: tauri::State<'_, PlanStore>,
     ops: tauri::State<'_, Operations>,
     plan_id: String,
+    excluded: Option<Vec<usize>>,
     on_progress: Channel<Progress>,
 ) -> Result<OrganizationPlan, String> {
     let dir = runs_dir(&app)?;
     let ctl = begin(&ops, Some(on_progress))?;
     // A plan can be claimed once: a double click cannot run it twice.
     let mut plan = store.claim(&plan_id)?;
-    planner::mark_changed_since_preview(&mut plan);
+    // Keep the plan as previewed, so a failed start can be retried with another selection.
     let backup = plan.clone();
+    if let Err(error) = planner::exclude_by_user(&mut plan, &excluded.unwrap_or_default()) {
+        store.restore(backup);
+        return Err(error);
+    }
+    if !plan
+        .actions
+        .iter()
+        .any(|action| action.status == "proposed")
+    {
+        store.restore(backup);
+        return Err("이동할 항목이 선택되지 않았습니다 / nothing is selected to move".into());
+    }
+    planner::mark_changed_since_preview(&mut plan);
     match blocking(move || journal::execute_with_journal_ctl(&dir, plan, &ctl)).await {
         Ok(done) => Ok(done),
         Err(error) => {

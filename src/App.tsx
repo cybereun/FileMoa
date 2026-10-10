@@ -253,6 +253,27 @@ export default function App() {
   const total = useMemo(() => plan?.actions.length ?? 0, [plan]);
   // Only a plan that still has moves waiting can be run; an executed one was consumed by the backend.
   const pendingCount = useMemo(() => plan?.actions.filter((action) => action.status === 'proposed').length ?? 0, [plan]);
+  // Rows the user unchecked in the preview; everything else is approved.
+  const [unchecked, setUnchecked] = useState<Set<number>>(() => new Set());
+  useEffect(() => setUnchecked(new Set()), [plan?.planId]);
+  const selectedCount = useMemo(
+    () => plan?.actions.filter((action, index) => action.status === 'proposed' && !unchecked.has(index)).length ?? 0,
+    [plan, unchecked],
+  );
+  function toggleRow(index: number) {
+    setUnchecked((previous) => {
+      const next = new Set(previous);
+      if (next.has(index)) next.delete(index); else next.add(index);
+      return next;
+    });
+  }
+  function toggleAllRows() {
+    if (!plan) return;
+    // Everything selected -> uncheck all pending rows; otherwise select them all.
+    setUnchecked(selectedCount === pendingCount
+      ? new Set(plan.actions.flatMap((action, index) => (action.status === 'proposed' ? [index] : [])))
+      : new Set());
+  }
   const selectedProvider = aiProviders.find((provider) => provider.id === selectedAi);
 
   async function choose() {
@@ -353,15 +374,16 @@ export default function App() {
 
   async function execute() {
     if (!plan) return;
-    const confirmation = pendingCount >= 100
+    if (!selectedCount) return;
+    const confirmation = selectedCount >= 100
       ? (lang === 'ko'
-        ? `대량 작업입니다. ${pendingCount}개 파일을 이동합니다. 미리보기와 경고를 확인했나요? 계속할까요?`
-        : `This is a bulk operation: ${pendingCount} files will move. Have you reviewed the preview and warnings? Continue?`)
-      : (lang === 'ko' ? `${pendingCount}개 파일을 이동할까요?` : `Move ${pendingCount} files?`);
+        ? `대량 작업입니다. ${selectedCount}개 파일을 이동합니다. 미리보기와 경고를 확인했나요? 계속할까요?`
+        : `This is a bulk operation: ${selectedCount} files will move. Have you reviewed the preview and warnings? Continue?`)
+      : (lang === 'ko' ? `${selectedCount}개 파일을 이동할까요?` : `Move ${selectedCount} files?`);
     if (!confirm(confirmation)) return;
     setBusy(true);
     try {
-      const done = await withProgress<Plan>('execute_organization', { planId: plan.planId });
+      const done = await withProgress<Plan>('execute_organization', { planId: plan.planId, excluded: [...unchecked] });
       setPlan(done);
       void refreshRuns();
       setPanel('history');
@@ -822,7 +844,7 @@ export default function App() {
     ? [
         { key: 'folder', icon: FolderOpen, action: choose },
         { key: 'preview', icon: Search, action: makePlan, disabled: !path },
-        { key: 'execute', icon: Play, action: execute, disabled: !plan || !plan.planId || !pendingCount },
+        { key: 'execute', icon: Play, action: execute, disabled: !plan || !plan.planId || !selectedCount },
         { key: 'aiClassify', icon: Bot, action: runAiClassification, disabled: !plan || !plan.planId || !pendingCount },
       ]
     : tab === 'manage'
@@ -897,9 +919,9 @@ export default function App() {
         {panel === 'plan' && <>
           <h2>{t.plan}</h2>
           {plan ? <>
-            <p>{planSummary({ files: total, exclusions: plan.exclusions.length, errors: plan.errors.length, warnings: plan.warnings?.length ?? 0 }, lang)}</p>
+            <p>{planSummary({ files: total, exclusions: plan.exclusions.length, errors: plan.errors.length, warnings: plan.warnings?.length ?? 0 }, lang)}{pendingCount > 0 && <strong className="selection-count"> · {lang === 'ko' ? `이동 선택 ${selectedCount}/${pendingCount}개` : `${selectedCount}/${pendingCount} selected to move`}</strong>}</p>
             {plan.warnings && plan.warnings.length > 0 && <details className="plan-details warning-details" open><summary>{t.warnings} ({plan.warnings.length})</summary>{plan.warnings.map((item, index) => <p key={`${item}-${index}`}>{item}</p>)}</details>}
-            <div className="table"><div className="row table-heading"><b>{t.category}</b><span>{lang === 'ko' ? '현재 위치' : 'Current path'}</span><span>{lang === 'ko' ? '이동 위치' : 'Destination'}</span><small>{t.status}</small></div>{plan.actions.map((action, index) => <div className={`row ${action.status !== 'proposed' ? `action-${action.status}` : ''}`} key={`${action.sourcePath}-${index}`}><b>{action.category}</b><span title={action.sourcePath}>{action.sourcePath}</span><span title={action.destinationPath}>→ {action.destinationPath}{action.collision && <em className="collision-badge">{t.collision}</em>}</span><small>{action.reason} · {action.status === 'proposed' ? (lang === 'ko' ? '이동 예정' : 'Pending') : action.status}</small></div>)}</div>
+            <div className="table"><div className="row row-select table-heading"><span className="row-check">{pendingCount > 0 && <input type="checkbox" aria-label={lang === 'ko' ? '이동할 항목 전체 선택' : 'Select all moves'} checked={selectedCount === pendingCount} ref={(element) => { if (element) element.indeterminate = selectedCount > 0 && selectedCount < pendingCount; }} onChange={toggleAllRows} />}</span><b>{t.category}</b><span>{lang === 'ko' ? '현재 위치' : 'Current path'}</span><span>{lang === 'ko' ? '이동 위치' : 'Destination'}</span><small>{t.status}</small></div>{plan.actions.map((action, index) => <div className={`row row-select ${action.status !== 'proposed' ? `action-${action.status}` : unchecked.has(index) ? 'row-unchecked' : ''}`} key={`${action.sourcePath}-${index}`}><span className="row-check">{action.status === 'proposed' && <input type="checkbox" aria-label={lang === 'ko' ? `${basename(action.sourcePath)} 이동` : `Move ${basename(action.sourcePath)}`} checked={!unchecked.has(index)} onChange={() => toggleRow(index)} />}</span><b>{action.category}</b><span title={action.sourcePath}>{action.sourcePath}</span><span title={action.destinationPath}>→ {action.destinationPath}{action.collision && <em className="collision-badge">{t.collision}</em>}</span><small>{action.reason} · {action.status === 'proposed' ? (lang === 'ko' ? '이동 예정' : 'Pending') : action.status}</small></div>)}</div>
             {plan.exclusions.length > 0 && <details className="plan-details"><summary>{lang === 'ko' ? '제외된 항목' : 'Excluded items'} ({plan.exclusions.length})</summary>{plan.exclusions.map((item, index) => <p key={`${item}-${index}`}>{item}</p>)}</details>}
             {plan.errors.length > 0 && <details className="plan-details error-details" open><summary>{t.errors} ({plan.errors.length})</summary>{plan.errors.map((item, index) => <p key={`${item}-${index}`}>{item}</p>)}</details>}
           </> : <Empty text={t.nothing} />}

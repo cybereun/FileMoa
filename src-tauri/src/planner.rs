@@ -1211,6 +1211,24 @@ fn path_blocker(action: &PlannedAction, roots: &[PathBuf]) -> Option<&'static st
     None
 }
 
+/// Mark the moves the user unchecked in the preview as skipped, so only what
+/// was approved runs. An index outside the plan is an error, not ignored.
+pub fn exclude_by_user(plan: &mut OrganizationPlan, indexes: &[usize]) -> Result<(), String> {
+    if let Some(bad) = indexes.iter().find(|index| **index >= plan.actions.len()) {
+        return Err(format!(
+            "선택 번호가 계획 범위를 벗어났습니다 / selection is outside the plan: {bad}"
+        ));
+    }
+    for &index in indexes {
+        let action = &mut plan.actions[index];
+        if action.status == "proposed" {
+            action.status = "skipped".into();
+            action.reason = "사용자가 제외함 / excluded by you".into();
+        }
+    }
+    Ok(())
+}
+
 /// Whole seconds since the epoch, the resolution plans and scans compare on.
 pub(crate) fn modified_secs(metadata: &fs::Metadata) -> Option<u64> {
     metadata
@@ -2728,5 +2746,48 @@ mod tests {
         english.language = "en".into();
         let english = create_plan(english).expect("plan");
         assert_eq!(english.actions[0].reason, "Filename contains 'invoice'");
+    }
+
+    #[test]
+    fn moves_the_user_unchecked_are_left_alone() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let names = ["a.txt", "b.txt", "c.txt"];
+        for name in names {
+            fs::write(root.join(name), b"x").expect("source");
+        }
+        let sources: Vec<PathBuf> = names.iter().map(|n| root.join(n)).collect();
+        let destinations: Vec<PathBuf> = names.iter().map(|n| root.join("Docs").join(n)).collect();
+        let pairs: Vec<(&Path, &Path)> = sources
+            .iter()
+            .zip(&destinations)
+            .map(|(s, d)| (s.as_path(), d.as_path()))
+            .collect();
+        let mut plan = plan_with(root, &pairs);
+        exclude_by_user(&mut plan, &[1, 1]).expect("exclude"); // a repeated index is harmless
+        let done = execute_plan_with(plan, |_, _| Ok(())).expect("execute");
+        let statuses: Vec<&str> = done.actions.iter().map(|a| a.status.as_str()).collect();
+        assert_eq!(statuses, ["executed", "skipped", "executed"]);
+        assert!(done.actions[1].reason.contains("excluded"));
+        assert!(sources[1].is_file(), "the unchecked file never moved");
+        assert!(destinations[0].is_file() && destinations[2].is_file());
+    }
+
+    #[test]
+    fn an_exclusion_outside_the_plan_is_refused_and_changes_nothing() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let source = root.join("a.txt");
+        fs::write(&source, b"x").expect("source");
+        let mut plan = plan_with(root, &[(&source, &root.join("Docs").join("a.txt"))]);
+        assert!(exclude_by_user(&mut plan, &[0, 5]).is_err());
+        assert_eq!(
+            plan.actions[0].status, "proposed",
+            "nothing was marked before the error"
+        );
+        // Moves that already ran are never rewritten.
+        plan.actions[0].status = "executed".into();
+        exclude_by_user(&mut plan, &[0]).expect("exclude");
+        assert_eq!(plan.actions[0].status, "executed");
     }
 }
