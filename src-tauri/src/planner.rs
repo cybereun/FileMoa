@@ -224,23 +224,41 @@ fn localised(language: &str, ko: &'static str, en: &'static str) -> &'static str
 
 fn builtin(ext: &str, language: &str, file_name: &str) -> (&'static str, &'static str) {
     let lower_name = file_name.to_ascii_lowercase();
-    let screenshot = ["screenshot", "snippingtool", "capture", "스크린샷", "캡처"]
-        .iter()
-        .any(|keyword| lower_name.contains(&keyword.to_ascii_lowercase()));
+    // Only an image can be a screenshot: `capture-tool.exe` or `screen
+    // capture.mp4` must keep their own category.
+    let is_image = matches!(
+        ext,
+        "jpg"
+            | "jpeg"
+            | "png"
+            | "gif"
+            | "webp"
+            | "bmp"
+            | "tiff"
+            | "tif"
+            | "heic"
+            | "heif"
+            | "avif"
+            | "jfif"
+    );
+    let screenshot = is_image
+        && ["screenshot", "snippingtool", "capture", "스크린샷", "캡처"]
+            .iter()
+            .any(|keyword| lower_name.contains(&keyword.to_ascii_lowercase()));
     match (ext, screenshot) {
         ("pdf", _) => (
             localised(language, "문서/PDF", "Documents/PDF"),
             localised(language, "PDF 문서", "PDF document"),
         ),
-        ("doc" | "docx", _) => (
+        ("doc" | "docx" | "odt", _) => (
             localised(language, "문서/Word", "Documents/Word"),
             localised(language, "Word 문서", "Word document"),
         ),
-        ("xls" | "xlsx" | "csv", _) => (
+        ("xls" | "xlsx" | "ods", _) => (
             localised(language, "문서/Excel", "Documents/Excel"),
             localised(language, "스프레드시트", "Spreadsheet"),
         ),
-        ("ppt" | "pptx", _) => (
+        ("ppt" | "pptx" | "odp", _) => (
             localised(language, "문서/PowerPoint", "Documents/PowerPoint"),
             localised(language, "프레젠테이션", "Presentation"),
         ),
@@ -248,7 +266,7 @@ fn builtin(ext: &str, language: &str, file_name: &str) -> (&'static str, &'stati
             localised(language, "문서/한글", "Documents/Hangul"),
             localised(language, "한글 문서", "Hangul document"),
         ),
-        ("txt" | "md" | "rtf", _) => (
+        ("txt" | "md" | "rtf" | "log", _) => (
             localised(language, "문서/텍스트", "Documents/Text"),
             localised(language, "텍스트 문서", "Text document"),
         ),
@@ -261,33 +279,42 @@ fn builtin(ext: &str, language: &str, file_name: &str) -> (&'static str, &'stati
             localised(language, "스크린샷", "Screenshot"),
         ),
         (
-            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "heic" | "avif" | "svg"
-            | "raw" | "cr2" | "nef" | "arw",
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "heic" | "heif"
+            | "avif" | "jfif" | "svg" | "ico" | "psd" | "ai" | "raw" | "cr2" | "nef" | "arw"
+            | "dng",
             _,
         ) => (
             localised(language, "이미지", "Images"),
             localised(language, "이미지", "Image"),
         ),
-        ("mp4" | "mov" | "avi" | "mkv" | "wmv" | "webm" | "m4v" | "mts", _) => (
+        (
+            "mp4" | "mov" | "avi" | "mkv" | "wmv" | "webm" | "m4v" | "mts" | "mpg" | "mpeg" | "flv"
+            | "3gp",
+            _,
+        ) => (
             localised(language, "동영상", "Videos"),
             localised(language, "동영상", "Video"),
         ),
-        ("mp3" | "wav" | "flac" | "aac" | "m4a" | "ogg" | "wma", _) => (
+        ("mp3" | "wav" | "flac" | "aac" | "m4a" | "ogg" | "wma" | "opus" | "aiff" | "mid", _) => (
             localised(language, "오디오", "Audio"),
             localised(language, "오디오", "Audio"),
         ),
-        ("zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz", _) => (
+        ("zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "tgz" | "zst" | "cab" | "lz", _) => (
             localised(language, "압축파일", "Archives"),
             localised(language, "압축 파일", "Archive"),
         ),
-        ("exe" | "msi" | "msix" | "msixbundle" | "appx" | "appxbundle", _) => (
+        (
+            "exe" | "msi" | "msix" | "msixbundle" | "appx" | "appxbundle" | "msu" | "msp" | "dmg"
+            | "apk",
+            _,
+        ) => (
             localised(language, "설치파일", "Installers"),
             localised(language, "설치 파일", "Installer"),
         ),
         (
             "js" | "jsx" | "ts" | "tsx" | "html" | "css" | "scss" | "py" | "java" | "kt" | "cpp"
             | "c" | "cs" | "go" | "rs" | "php" | "sql" | "json" | "yaml" | "yml" | "toml" | "xml"
-            | "env" | "ipynb",
+            | "env" | "ipynb" | "bat" | "cmd" | "ps1" | "sh" | "vue",
             _,
         ) => (
             localised(language, "개발", "Development"),
@@ -301,7 +328,7 @@ fn builtin(ext: &str, language: &str, file_name: &str) -> (&'static str, &'stati
             localised(language, "디스크 이미지", "Disk images"),
             localised(language, "디스크 이미지", "Disk image"),
         ),
-        ("sqlite" | "db" | "parquet", _) => (
+        ("sqlite" | "db" | "parquet" | "csv" | "tsv" | "jsonl", _) => (
             localised(language, "데이터", "Data"),
             localised(language, "데이터 파일", "Data file"),
         ),
@@ -638,6 +665,58 @@ fn metadata_time(metadata: &fs::Metadata, basis: &str) -> Option<DateTime<Local>
     Some(DateTime::<Local>::from(value))
 }
 
+/// Folder for the first letter of a file name: a Korean initial consonant
+/// (double consonants fold into their base), `A`-`Z`, `0-9`, or `#`.
+fn name_initial(file_name: &str) -> String {
+    const HANGUL_INITIALS: [&str; 19] = [
+        "ㄱ", "ㄱ", "ㄴ", "ㄷ", "ㄷ", "ㄹ", "ㅁ", "ㅂ", "ㅂ", "ㅅ", "ㅅ", "ㅇ", "ㅈ", "ㅈ", "ㅊ",
+        "ㅋ", "ㅌ", "ㅍ", "ㅎ",
+    ];
+    for character in file_name.chars() {
+        match character {
+            '가'..='힣' => {
+                let index = (character as u32 - '가' as u32) / 588;
+                return HANGUL_INITIALS[index as usize].to_string();
+            }
+            // Compatibility consonants typed on their own (ㅋㅋ.txt).
+            'ㄱ'..='ㅎ' => {
+                let folded = match character {
+                    'ㄲ' => 'ㄱ',
+                    'ㄸ' => 'ㄷ',
+                    'ㅃ' => 'ㅂ',
+                    'ㅆ' => 'ㅅ',
+                    'ㅉ' => 'ㅈ',
+                    other => other,
+                };
+                return folded.to_string();
+            }
+            letter if letter.is_ascii_alphabetic() => {
+                return letter.to_ascii_uppercase().to_string();
+            }
+            digit if digit.is_ascii_digit() => return "0-9".into(),
+            // Any other letter (kana, accents, ...) goes to the catch-all.
+            other if other.is_alphanumeric() => return "#".into(),
+            // Brackets, dots, spaces: look at the next character.
+            _ => {}
+        }
+    }
+    "#".into()
+}
+
+fn name_category(path: &Path, language: &str) -> String {
+    // The extension is not part of the name: `!!!.txt` must not become `T`.
+    let name = path
+        .file_stem()
+        .or_else(|| path.file_name())
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    format!(
+        "{}/{}",
+        localised(language, "이름", "Name"),
+        name_initial(&name)
+    )
+}
+
 fn size_category(size: u64, language: &str) -> String {
     let mb = 1024_u64 * 1024;
     let (label_ko, label_en) = if size <= mb {
@@ -662,10 +741,12 @@ fn category_for(path: &Path, metadata: &fs::Metadata, req: &PlanRequest) -> (Str
     if let Some((category, reason)) = keyword_category(path, &req.keyword_rules) {
         return (sanitize_category(&category, &req.language), reason);
     }
+    let mut date_missing = false;
     if req.basis.eq_ignore_ascii_case("date")
         || req.basis.eq_ignore_ascii_case("date_day")
         || req.basis.eq_ignore_ascii_case("year")
     {
+        date_missing = metadata_time(metadata, &req.date_basis).is_none();
         if let Some(date) = metadata_time(metadata, &req.date_basis) {
             let category = if req.basis.eq_ignore_ascii_case("year") {
                 date.format("%Y").to_string()
@@ -686,6 +767,17 @@ fn category_for(path: &Path, metadata: &fs::Metadata, req: &PlanRequest) -> (Str
             localised(&req.language, "파일 크기 기준", "Size-based rule").into(),
         );
     }
+    if req.basis.eq_ignore_ascii_case("name") {
+        return (
+            name_category(path, &req.language),
+            localised(
+                &req.language,
+                "파일명 첫 글자 기준",
+                "Filename-initial rule",
+            )
+            .into(),
+        );
+    }
     if let Some((category, reason)) = custom_category(path, &req.custom_categories) {
         return (sanitize_category(&category, &req.language), reason);
     }
@@ -694,7 +786,19 @@ fn category_for(path: &Path, metadata: &fs::Metadata, req: &PlanRequest) -> (Str
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_default();
     let (category, reason) = builtin(&extension(path), &req.language, &file_name);
-    (category.into(), reason.into())
+    let reason = if date_missing {
+        format!(
+            "{reason} · {}",
+            localised(
+                &req.language,
+                "날짜 정보를 읽지 못해 파일 형식으로 분류",
+                "no date available, used the file type"
+            )
+        )
+    } else {
+        reason.to_string()
+    };
+    (category.into(), reason)
 }
 
 fn is_hidden(entry: &DirEntry) -> bool {
@@ -856,7 +960,20 @@ pub fn create_plan_ctl(req: PlanRequest, ctl: &Ctl) -> Result<OrganizationPlan, 
     let mut errors = Vec::new();
     let mut reserved_destinations = HashSet::new();
     let mut projects = ProjectCache::default();
-    let warnings = root_warnings(&root);
+    let mut warnings = root_warnings(&root);
+    let date_based = ["date", "date_day", "year"]
+        .iter()
+        .any(|basis| req.basis.eq_ignore_ascii_case(basis));
+    if date_based && req.date_basis.eq_ignore_ascii_case("accessed") {
+        warnings.push(
+            localised(
+                &req.language,
+                "마지막 접근 날짜는 Windows 설정에 따라 갱신되지 않을 수 있어 결과가 부정확할 수 있습니다. 생성·수정 날짜를 권장합니다.",
+                "Last-accessed dates are often not maintained by Windows, so the result may be inaccurate. Created or modified dates are more reliable.",
+            )
+            .into(),
+        );
+    }
     let walker = if req.include_subfolders {
         WalkDir::new(&root).min_depth(1)
     } else {
@@ -2452,5 +2569,82 @@ mod tests {
             2 * 200 * 1024,
             "bytes to hash = the two candidate files"
         );
+    }
+
+    fn category_of(file: &str, basis: &str, language: &str) -> String {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join(file);
+        fs::write(&path, b"x").expect("file");
+        let mut req = request(directory.path());
+        req.basis = basis.into();
+        req.language = language.into();
+        let plan = create_plan(req).expect("plan");
+        plan.actions[0].category.clone()
+    }
+
+    #[test]
+    fn only_images_can_be_screenshots() {
+        assert_eq!(
+            category_of("Screenshot 2026-10-10.png", "type", "ko"),
+            "이미지/스크린샷"
+        );
+        assert_eq!(category_of("캡처1.jpg", "type", "ko"), "이미지/스크린샷");
+        assert_eq!(category_of("capture-tool.exe", "type", "ko"), "설치파일");
+        assert_eq!(category_of("screen capture.mp4", "type", "ko"), "동영상");
+        assert_eq!(category_of("capture.zip", "type", "en"), "Archives");
+        assert_eq!(category_of("holiday.png", "type", "ko"), "이미지");
+    }
+
+    #[test]
+    fn csv_is_data_and_more_extensions_are_known() {
+        assert_eq!(category_of("sales.csv", "type", "ko"), "데이터");
+        assert_eq!(category_of("sales.csv", "type", "en"), "Data");
+        assert_eq!(category_of("sheet.xlsx", "type", "ko"), "문서/Excel");
+        assert_eq!(category_of("sheet.ods", "type", "ko"), "문서/Excel");
+        assert_eq!(category_of("letter.odt", "type", "ko"), "문서/Word");
+        assert_eq!(category_of("server.log", "type", "ko"), "문서/텍스트");
+        assert_eq!(category_of("logo.psd", "type", "ko"), "이미지");
+        assert_eq!(category_of("clip.mpg", "type", "ko"), "동영상");
+        assert_eq!(category_of("song.opus", "type", "ko"), "오디오");
+        assert_eq!(category_of("data.tgz", "type", "ko"), "압축파일");
+        assert_eq!(category_of("tool.apk", "type", "ko"), "설치파일");
+        assert_eq!(category_of("run.ps1", "type", "ko"), "개발");
+        assert_eq!(category_of("mystery.xyz", "type", "ko"), "기타");
+    }
+
+    #[test]
+    fn filename_basis_groups_by_first_letter() {
+        assert_eq!(category_of("가방.txt", "name", "ko"), "이름/ㄱ");
+        assert_eq!(category_of("까치.txt", "name", "ko"), "이름/ㄱ"); // ㄲ folds into ㄱ
+        assert_eq!(category_of("뿌리.txt", "name", "ko"), "이름/ㅂ");
+        assert_eq!(category_of("한글.txt", "name", "ko"), "이름/ㅎ");
+        assert_eq!(category_of("ㅋㅋ.txt", "name", "ko"), "이름/ㅋ");
+        assert_eq!(category_of("apple.png", "name", "ko"), "이름/A");
+        assert_eq!(category_of("Zebra.png", "name", "en"), "Name/Z");
+        assert_eq!(category_of("7zip.exe", "name", "ko"), "이름/0-9");
+        assert_eq!(category_of("[초안] 나나.pdf", "name", "ko"), "이름/ㅊ"); // skips the bracket itself
+        assert_eq!(category_of("[draft] 나나.pdf", "name", "ko"), "이름/D"); // the first letter counts
+        assert_eq!(category_of("  _내 파일.pdf", "name", "ko"), "이름/ㄴ");
+        assert_eq!(category_of("!!!.txt", "name", "ko"), "이름/#");
+        assert_eq!(category_of("éclair.txt", "name", "ko"), "이름/#");
+    }
+
+    #[test]
+    fn last_accessed_dates_come_with_a_warning() {
+        let directory = tempdir().expect("temp directory");
+        fs::write(directory.path().join("a.txt"), b"x").expect("file");
+        let mut req = request(directory.path());
+        req.basis = "date".into();
+        req.date_basis = "accessed".into();
+        let plan = create_plan(req).expect("plan");
+        assert!(plan.warnings.iter().any(|warning| warning.contains("접근")));
+
+        let mut modified = request(directory.path());
+        modified.basis = "date".into();
+        assert!(!create_plan(modified)
+            .expect("plan")
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("접근")));
     }
 }
