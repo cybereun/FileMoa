@@ -1345,3 +1345,12 @@ main {
     display: none;
   }
 }
+
+/* The title icon is the installer icon, so the window and the installed app match. */
+.brand-icon {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 3px rgba(20, 70, 130, 0.25));
+}

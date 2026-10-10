@@ -13,7 +13,6 @@ import {
   Eye,
   EyeOff,
   ExternalLink,
-  Files,
   FileText,
   Film,
   FolderOpen,
@@ -39,6 +38,7 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react';
+import appIcon from './assets/app-icon.png';
 import './styles.css';
 import { basename, cloudOnlyNotice as cloudOnlyMessage, formatBytes, isCancelledError, progressPercent, providerStatus, requestCount, runTitle as runTitleText, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
 
@@ -842,7 +842,7 @@ export default function App() {
     <main>
       <header className="top-nav">
         <div className="brand">
-          <Files size={25} />
+          <img className="brand-icon" src={appIcon} alt="" width={44} height={44} />
           <div>
             <div className="brand-line"><h1>FileMoa</h1><span className="app-version">v{APP_VERSION}</span></div>
             <p>{lang === 'ko' ? '안전하게 정리하고, 언제든 되돌리세요' : 'Organize safely. Undo anytime.'}</p>
