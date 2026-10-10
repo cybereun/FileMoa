@@ -52,6 +52,18 @@ type Plan = {
   rootPaths?: string[];
   runId?: string;
 };
+type RunSummary = {
+  runId: string;
+  status: string;
+  rootPath: string;
+  createdAt: string;
+  updatedAt: string;
+  executedCount: number;
+  undoneCount: number;
+  failedCount: number;
+  errorCount: number;
+  exclusionCount: number;
+};
 type Duplicate = {
   hash: string;
   sizeBytes: number;
@@ -137,16 +149,33 @@ const labels = {
 
 function readLocal<T>(key: string, fallback: T): T {
   try {
-    const value = localStorage.getItem(key);
+    const value = readLocalText(key);
     return value ? (JSON.parse(value) as T) : fallback;
   } catch {
     return fallback;
   }
 }
 
+function readLocalText(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/** Preferences are conveniences: a full or blocked store must never break the app. */
+function writeLocal(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // ignore: the setting simply will not persist
+  }
+}
+
 export default function App() {
   const [lang, setLang] = useState<'ko' | 'en'>(() => {
-    const stored = localStorage.getItem('filemoa-language');
+    const stored = readLocalText('filemoa-language');
     if (stored === 'ko' || stored === 'en') return stored;
     return navigator.language.toLowerCase().startsWith('ko') ? 'ko' : 'en';
   });
@@ -157,14 +186,7 @@ export default function App() {
   const [multiRoot, setMultiRoot] = useState(false);
   const [sub, setSub] = useState(false);
   const [plan, setPlan] = useState<Plan | null>(null);
-  const [runs, setRuns] = useState<Plan[]>(() => {
-    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    return readLocal<Plan[]>('filemoa-runs', []).filter((run) => {
-      if (!run.createdAt) return true;
-      const timestamp = Date.parse(run.createdAt);
-      return Number.isNaN(timestamp) || timestamp >= cutoff;
-    });
-  });
+  const [runs, setRuns] = useState<RunSummary[]>([]);
   const [cats, setCats] = useState<Category[]>(() => readLocal('filemoa-categories', []));
   const [rules, setRules] = useState<KeywordRule[]>(() => readLocal('filemoa-keyword-rules', []));
   const [excludedPaths, setExcludedPaths] = useState<string[]>(() => readLocal('filemoa-excluded-paths', []));
@@ -176,11 +198,12 @@ export default function App() {
   const [cleanupSelection, setCleanupSelection] = useState<string[]>([]);
   const [scanPanel, setScanPanel] = useState<ScanPanel>(null);
   const scanRequestRef = useRef(0);
+  const startupRan = useRef(false);
   const [knownFolders, setKnownFolders] = useState<KnownFolder[]>([]);
-  const [basis, setBasis] = useState(() => localStorage.getItem('filemoa-basis') || 'type');
-  const [mode, setMode] = useState(() => localStorage.getItem('filemoa-mode') || 'safe');
-  const [dateBasis, setDateBasis] = useState(() => localStorage.getItem('filemoa-date-basis') || 'modified');
-  const [largeThresholdMb, setLargeThresholdMb] = useState(() => localStorage.getItem('filemoa-large-threshold-mb') || '100');
+  const [basis, setBasis] = useState(() => readLocalText('filemoa-basis') || 'type');
+  const [mode, setMode] = useState(() => readLocalText('filemoa-mode') || 'safe');
+  const [dateBasis, setDateBasis] = useState(() => readLocalText('filemoa-date-basis') || 'modified');
+  const [largeThresholdMb, setLargeThresholdMb] = useState(() => readLocalText('filemoa-large-threshold-mb') || '100');
   const [includeHidden, setIncludeHidden] = useState(false);
   const [undoPreview, setUndoPreview] = useState<Plan | null>(null);
   const [aiProviders, setAiProviders] = useState<AiProvider[]>([]);
@@ -270,6 +293,14 @@ export default function App() {
     }
   }
 
+  async function refreshRuns() {
+    try {
+      setRuns(await invoke<RunSummary[]>('list_runs'));
+    } catch (error) {
+      setNotice(String(error));
+    }
+  }
+
   async function execute() {
     if (!plan) return;
     const confirmation = total >= 100
@@ -282,7 +313,7 @@ export default function App() {
     try {
       const done = await invoke<Plan>('execute_organization', { plan });
       setPlan(done);
-      setRuns((previous) => [done, ...previous].slice(0, 100));
+      void refreshRuns();
       setPanel('history');
       setNotice(lang === 'ko' ? '정리가 완료되었습니다.' : 'Organization completed.');
     } catch (error) {
@@ -292,18 +323,23 @@ export default function App() {
     }
   }
 
-  function openUndoPreview(run = runs[0]) {
-    if (run) setUndoPreview(run);
+  async function openUndoPreview(runId = runs.find((run) => run.executedCount > 0)?.runId) {
+    if (!runId) return;
+    try {
+      setUndoPreview(await invoke<Plan>('load_run', { runId }));
+    } catch (error) {
+      setNotice(String(error));
+    }
   }
 
-  async function undo(run = undoPreview ?? runs[0]) {
+  async function undo(run = undoPreview) {
     if (!run) return;
     const restoreCount = run.actions.filter((action) => action.status === 'executed').length;
     if (!restoreCount || !confirm(lang === 'ko' ? `${restoreCount}개 파일을 원래 위치로 되돌릴까요? 기존 파일은 덮어쓰지 않습니다.` : `Restore ${restoreCount} files to their original locations? Existing files will never be overwritten.`)) return;
     setBusy(true);
     try {
       const done = await invoke<Plan>('undo_organization', { plan: run });
-      setRuns((previous) => [done, ...previous.slice(1)]);
+      void refreshRuns();
       setPlan(done);
       setUndoPreview(null);
       setNotice(lang === 'ko' ? '마지막 정리를 되돌렸습니다.' : 'Last organization was undone.');
@@ -599,33 +635,60 @@ export default function App() {
         }
       })
       .catch((error) => setNotice(String(error)));
-    void invoke<Plan[]>('recover_interrupted_runs')
-      .then((recovered) => {
-        if (!recovered.length) return;
-        setRuns((previous) => [...recovered, ...previous].slice(0, 100));
-        const moved = recovered.reduce((sum, run) => sum + run.actions.filter((action) => action.status === 'executed').length, 0);
-        setPanel('history');
-        setNotice(lang === 'ko'
-          ? `이전 정리가 중단되었습니다. 이동된 ${moved}개 파일이 기록에 복구되었습니다. 정리 기록에서 확인하거나 되돌릴 수 있습니다.`
-          : `A previous organization was interrupted. ${moved} moved files were recovered into the history, where you can review or undo them.`);
-      })
-      .catch((error) => setNotice(String(error)));
+    // StrictMode runs effects twice in development; import and recovery must run once.
+    if (startupRan.current) return;
+    startupRan.current = true;
+    void (async () => {
+      let notice = '';
+      const legacy = readLocal<Plan[]>('filemoa-runs', []);
+      if (legacy.length) {
+        let failed = 0;
+        for (const run of legacy) {
+          try {
+            await invoke('import_legacy_runs', { runs: [run] });
+          } catch {
+            failed += 1;
+          }
+        }
+        try {
+          localStorage.removeItem('filemoa-runs');
+        } catch {
+          // ignore
+        }
+        if (failed) {
+          notice = lang === 'ko' ? `이전 기록 ${failed}개를 가져오지 못했습니다.` : `${failed} older history entries could not be imported.`;
+        }
+      }
+      try {
+        const recovered = await invoke<Plan[]>('recover_interrupted_runs');
+        if (recovered.length) {
+          const moved = recovered.reduce((sum, run) => sum + run.actions.filter((action) => action.status === 'executed').length, 0);
+          setPanel('history');
+          notice = lang === 'ko'
+            ? `이전 정리가 중단되었습니다. 이동된 ${moved}개 파일이 기록에 복구되었습니다. 정리 기록에서 확인하거나 되돌릴 수 있습니다.`
+            : `A previous organization was interrupted. ${moved} moved files were recovered into the history, where you can review or undo them.`;
+        }
+      } catch (error) {
+        notice = String(error);
+      }
+      await refreshRuns();
+      if (notice) setNotice(notice);
+    })();
     // Startup checks are silent: they only set the update badge/notice.
     void checkForUpdate(false);
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('filemoa-language', lang);
-    localStorage.setItem('filemoa-categories', JSON.stringify(cats));
-    localStorage.setItem('filemoa-keyword-rules', JSON.stringify(rules));
-    localStorage.setItem('filemoa-excluded-paths', JSON.stringify(excludedPaths));
-    localStorage.setItem('filemoa-excluded-extensions', JSON.stringify(excludedExtensions));
-    localStorage.setItem('filemoa-basis', basis);
-    localStorage.setItem('filemoa-mode', mode);
-    localStorage.setItem('filemoa-date-basis', dateBasis);
-    localStorage.setItem('filemoa-large-threshold-mb', largeThresholdMb);
-    localStorage.setItem('filemoa-runs', JSON.stringify(runs));
-  }, [lang, cats, rules, excludedPaths, excludedExtensions, basis, mode, dateBasis, largeThresholdMb, runs]);
+    writeLocal('filemoa-language', lang);
+    writeLocal('filemoa-categories', JSON.stringify(cats));
+    writeLocal('filemoa-keyword-rules', JSON.stringify(rules));
+    writeLocal('filemoa-excluded-paths', JSON.stringify(excludedPaths));
+    writeLocal('filemoa-excluded-extensions', JSON.stringify(excludedExtensions));
+    writeLocal('filemoa-basis', basis);
+    writeLocal('filemoa-mode', mode);
+    writeLocal('filemoa-date-basis', dateBasis);
+    writeLocal('filemoa-large-threshold-mb', largeThresholdMb);
+  }, [lang, cats, rules, excludedPaths, excludedExtensions, basis, mode, dateBasis, largeThresholdMb]);
 
   useEffect(() => {
     const provider = aiProviders.find((item) => item.id === selectedAi);
@@ -683,7 +746,7 @@ export default function App() {
           { key: 'aiSettings', icon: Bot, action: () => setPanel('ai') },
         ]
       : [
-          { key: 'undo', icon: Undo2, action: () => openUndoPreview(), disabled: !runs.length },
+          { key: 'undo', icon: Undo2, action: () => void openUndoPreview(), disabled: !runs.some((run) => run.executedCount > 0) },
           { key: 'history', icon: History, action: () => setPanel('history') },
         ];
 
@@ -775,7 +838,7 @@ export default function App() {
 
         {panel === 'history' && <>
           <h2>{t.history}</h2>
-          {runs.length ? runs.map((run, index) => <div className="card" key={`${run.rootPath}-${index}`}><b>{run.actions.filter((action) => action.status === 'executed').length} files moved</b><span>{run.rootPath}</span><span className="muted">{run.createdAt ? new Date(run.createdAt).toLocaleString() : ''} · {run.exclusions.length} exclusions · {run.errors.length} errors</span>{index === 0 && <button onClick={() => openUndoPreview(run)}>{t.undo}</button>}</div>) : <Empty text={t.nothing} />}
+          {runs.length ? runs.map((run) => <div className="card" key={run.runId}><b>{run.executedCount} files moved{run.status === 'interrupted' ? (lang === 'ko' ? ' · 중단됨' : ' · interrupted') : ''}{run.undoneCount > 0 ? (lang === 'ko' ? ` · ${run.undoneCount}개 되돌림` : ` · ${run.undoneCount} undone`) : ''}</b><span>{run.rootPath}</span><span className="muted">{run.updatedAt ? new Date(run.updatedAt).toLocaleString() : ''} · {run.exclusionCount} exclusions · {run.errorCount} errors</span>{run.executedCount > 0 && <button onClick={() => void openUndoPreview(run.runId)}>{t.undo}</button>}</div>) : <Empty text={t.nothing} />}
         </>}
 
         {panel === 'ai' && <>

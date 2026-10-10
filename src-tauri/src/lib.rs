@@ -112,8 +112,34 @@ fn recover_interrupted_runs(app: AppHandle) -> Result<Vec<OrganizationPlan>, Str
 }
 
 #[tauri::command]
-fn undo_organization(plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
-    planner::undo_plan(plan)
+fn undo_organization(app: AppHandle, plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
+    let mut undone = planner::undo_plan(plan)?;
+    // Files are already restored; a record that cannot be saved must not turn
+    // that success into an error, so surface it as a warning instead.
+    if let Err(error) = journal::save_finished(&runs_dir(&app)?, &undone) {
+        undone.warnings.push(error);
+    }
+    Ok(undone)
+}
+
+#[tauri::command]
+fn list_runs(app: AppHandle) -> Result<Vec<journal::RunSummary>, String> {
+    journal::list_runs(&runs_dir(&app)?, 30)
+}
+
+#[tauri::command]
+fn load_run(app: AppHandle, run_id: String) -> Result<OrganizationPlan, String> {
+    journal::load_run(&runs_dir(&app)?, &run_id)
+}
+
+#[tauri::command]
+fn delete_run(app: AppHandle, run_id: String) -> Result<(), String> {
+    journal::delete_run(&runs_dir(&app)?, &run_id)
+}
+
+#[tauri::command]
+fn import_legacy_runs(app: AppHandle, runs: Vec<OrganizationPlan>) -> Result<usize, String> {
+    journal::import_legacy(&runs_dir(&app)?, runs)
 }
 
 #[tauri::command]
@@ -156,6 +182,10 @@ pub fn run() {
             plan_multiple_organizations,
             execute_organization,
             recover_interrupted_runs,
+            list_runs,
+            load_run,
+            delete_run,
+            import_legacy_runs,
             undo_organization,
             find_duplicates,
             find_large_files,

@@ -8,6 +8,7 @@
 //! journal on the next start so the files that did move can still be undone.
 
 use crate::planner::{execute_plan_with, OrganizationPlan, PlannedAction};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
@@ -26,7 +27,25 @@ struct RunRecord {
     schema_version: u32,
     /// `running`, `completed`, or `interrupted`.
     status: String,
+    #[serde(default)]
+    updated_at: String,
     plan: OrganizationPlan,
+}
+
+/// Lightweight row for the history list; the full plan is loaded on demand.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSummary {
+    pub run_id: String,
+    pub status: String,
+    pub root_path: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub executed_count: usize,
+    pub undone_count: usize,
+    pub failed_count: usize,
+    pub error_count: usize,
+    pub exclusion_count: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -51,9 +70,19 @@ fn record_path(dir: &Path, run_id: &str) -> PathBuf {
 }
 
 fn write_record(path: &Path, status: &str, plan: &OrganizationPlan) -> Result<(), String> {
+    write_record_at(path, status, plan, &Utc::now().to_rfc3339())
+}
+
+fn write_record_at(
+    path: &Path,
+    status: &str,
+    plan: &OrganizationPlan,
+    updated_at: &str,
+) -> Result<(), String> {
     let record = RunRecord {
         schema_version: SCHEMA_VERSION,
         status: status.into(),
+        updated_at: updated_at.into(),
         plan: plan.clone(),
     };
     let encoded = serde_json::to_vec(&record)
@@ -175,6 +204,158 @@ fn apply_journal(plan: &mut OrganizationPlan, journal_path: &Path) {
             plan.errors.push(message);
         }
     }
+}
+
+/// Run ids become file names, so only well-formed UUIDs are accepted.
+fn checked_record_path(dir: &Path, run_id: &str) -> Result<PathBuf, String> {
+    uuid::Uuid::parse_str(run_id)
+        .map_err(|_| "잘못된 실행 기록 ID입니다 / invalid run id".to_string())?;
+    Ok(record_path(dir, run_id))
+}
+
+fn read_record_file(path: &Path) -> Option<RunRecord> {
+    let contents = fs::read_to_string(path).ok()?;
+    let record = serde_json::from_str::<RunRecord>(&contents).ok()?;
+    (record.schema_version == SCHEMA_VERSION).then_some(record)
+}
+
+fn parse_time(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|time| time.with_timezone(&Utc))
+}
+
+fn record_time(record: &RunRecord) -> Option<DateTime<Utc>> {
+    parse_time(&record.updated_at).or_else(|| parse_time(&record.plan.created_at))
+}
+
+/// Finished runs for the history panel, newest first. Runs older than
+/// `retention_days` are deleted here, matching the 30-day Undo window.
+pub fn list_runs(dir: &Path, retention_days: i64) -> Result<Vec<RunSummary>, String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "실행 기록 폴더를 읽을 수 없습니다 / cannot read runs folder: {error}"
+            ))
+        }
+    };
+    let cutoff = Utc::now() - Duration::days(retention_days);
+    let mut rows: Vec<(DateTime<Utc>, RunSummary)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(record) = read_record_file(&path) else {
+            continue;
+        };
+        // A `running` record belongs to a live run (or awaits recovery).
+        if record.status == "running" {
+            continue;
+        }
+        let time = record_time(&record);
+        if time.is_some_and(|time| time < cutoff) {
+            let _ = fs::remove_file(&path);
+            continue;
+        }
+        let count = |status: &str| {
+            record
+                .plan
+                .actions
+                .iter()
+                .filter(|action| action.status == status)
+                .count()
+        };
+        rows.push((
+            time.unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
+            RunSummary {
+                run_id: record.plan.run_id.clone(),
+                status: record.status.clone(),
+                root_path: record.plan.root_path.clone(),
+                created_at: record.plan.created_at.clone(),
+                updated_at: record.updated_at.clone(),
+                executed_count: count("executed"),
+                undone_count: count("undone"),
+                failed_count: count("failed"),
+                error_count: record.plan.errors.len(),
+                exclusion_count: record.plan.exclusions.len(),
+            },
+        ));
+    }
+    rows.sort_by(|left, right| right.0.cmp(&left.0));
+    Ok(rows.into_iter().map(|(_, row)| row).collect())
+}
+
+pub fn load_run(dir: &Path, run_id: &str) -> Result<OrganizationPlan, String> {
+    let path = checked_record_path(dir, run_id)?;
+    read_record_file(&path)
+        .map(|record| record.plan)
+        .ok_or_else(|| "실행 기록을 찾을 수 없습니다 / run record not found".to_string())
+}
+
+pub fn delete_run(dir: &Path, run_id: &str) -> Result<(), String> {
+    let path = checked_record_path(dir, run_id)?;
+    if read_record_file(&path).is_some_and(|record| record.status == "running") {
+        return Err(
+            "진행 중인 실행 기록은 삭제할 수 없습니다 / a run in progress cannot be deleted".into(),
+        );
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "실행 기록을 삭제할 수 없습니다 / cannot delete run record: {error}"
+        )),
+    }
+}
+
+/// Persist a finished run's new state (for example after an undo). Plans
+/// that were never recorded are ignored.
+pub fn save_finished(dir: &Path, plan: &OrganizationPlan) -> Result<(), String> {
+    if plan.run_id.is_empty() {
+        return Ok(());
+    }
+    let path = checked_record_path(dir, &plan.run_id)?;
+    let status = read_record_file(&path)
+        .map(|record| record.status)
+        .unwrap_or_else(|| "completed".into());
+    if status == "running" {
+        return Err(
+            "진행 중인 실행 기록은 갱신할 수 없습니다 / a run in progress cannot be updated".into(),
+        );
+    }
+    fs::create_dir_all(dir).map_err(|e| {
+        format!("실행 기록 폴더를 만들 수 없습니다 / cannot create runs folder: {e}")
+    })?;
+    write_record(&path, &status, plan)
+}
+
+/// One-time import of history that older versions kept in the WebView's
+/// localStorage. Existing records are never overwritten.
+pub fn import_legacy(dir: &Path, plans: Vec<OrganizationPlan>) -> Result<usize, String> {
+    fs::create_dir_all(dir).map_err(|e| {
+        format!("실행 기록 폴더를 만들 수 없습니다 / cannot create runs folder: {e}")
+    })?;
+    let mut imported = 0;
+    for mut plan in plans {
+        if uuid::Uuid::parse_str(&plan.run_id).is_err() {
+            plan.run_id = uuid::Uuid::new_v4().to_string();
+        }
+        let path = record_path(dir, &plan.run_id);
+        if path.exists() {
+            continue;
+        }
+        let updated_at = if parse_time(&plan.created_at).is_some() {
+            plan.created_at.clone()
+        } else {
+            Utc::now().to_rfc3339()
+        };
+        write_record_at(&path, "completed", &plan, &updated_at)?;
+        imported += 1;
+    }
+    Ok(imported)
 }
 
 /// Close out runs that were still `running` when the app last stopped.
@@ -340,5 +521,91 @@ mod tests {
         assert!(execute_with_journal(&blocker.join("runs"), plan).is_err());
         assert!(source.is_file());
         assert!(!destination.exists());
+    }
+
+    fn finished_plan(root: &Path, created_at: String) -> OrganizationPlan {
+        let mut plan = plan_for(root, Vec::new());
+        plan.created_at = created_at;
+        plan
+    }
+
+    #[test]
+    fn list_load_delete_and_prune_runs() {
+        let root = tempdir().expect("root");
+        let runs = tempdir().expect("runs");
+        let source = root.path().join("a.txt");
+        fs::write(&source, b"a").expect("source");
+        let destination = root.path().join("Text").join("a.txt");
+        let plan = plan_for(root.path(), vec![action(&source, &destination)]);
+        let done = execute_with_journal(runs.path(), plan).expect("run");
+
+        // A stale record beyond the retention window is pruned on listing.
+        let old = (Utc::now() - Duration::days(40)).to_rfc3339();
+        assert_eq!(
+            import_legacy(runs.path(), vec![finished_plan(root.path(), old)]).expect("import"),
+            1
+        );
+
+        let rows = list_runs(runs.path(), 30).expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].run_id, done.run_id);
+        assert_eq!(rows[0].executed_count, 1);
+        assert_eq!(
+            load_run(runs.path(), &done.run_id)
+                .expect("load")
+                .actions
+                .len(),
+            1
+        );
+
+        delete_run(runs.path(), &done.run_id).expect("delete");
+        assert!(list_runs(runs.path(), 30).expect("list").is_empty());
+        assert!(load_run(runs.path(), &done.run_id).is_err());
+    }
+
+    #[test]
+    fn run_ids_that_are_not_uuids_are_rejected() {
+        let runs = tempdir().expect("runs");
+        assert!(load_run(runs.path(), "..\\..\\evil").is_err());
+        assert!(delete_run(runs.path(), "../x").is_err());
+    }
+
+    #[test]
+    fn undo_state_is_persisted_and_running_records_are_protected() {
+        let root = tempdir().expect("root");
+        let runs = tempdir().expect("runs");
+        let source = root.path().join("a.txt");
+        fs::write(&source, b"a").expect("source");
+        let destination = root.path().join("Text").join("a.txt");
+        let plan = plan_for(root.path(), vec![action(&source, &destination)]);
+        let done = execute_with_journal(runs.path(), plan).expect("run");
+
+        let undone = undo_plan(done).expect("undo");
+        save_finished(runs.path(), &undone).expect("save");
+        let reloaded = load_run(runs.path(), &undone.run_id).expect("load");
+        assert_eq!(reloaded.actions[0].status, "undone");
+        assert_eq!(list_runs(runs.path(), 30).unwrap()[0].undone_count, 1);
+
+        let mut live = plan_for(root.path(), Vec::new());
+        let _journal = RunJournal::begin(runs.path(), &mut live).expect("begin");
+        assert!(delete_run(runs.path(), &live.run_id).is_err());
+        assert!(save_finished(runs.path(), &live).is_err());
+    }
+
+    #[test]
+    fn legacy_import_keeps_existing_records_and_assigns_ids() {
+        let root = tempdir().expect("root");
+        let runs = tempdir().expect("runs");
+        let now = Utc::now().to_rfc3339();
+        let plans = vec![
+            finished_plan(root.path(), now.clone()),
+            finished_plan(root.path(), now),
+        ];
+        assert_eq!(import_legacy(runs.path(), plans).expect("first"), 2);
+        let rows = list_runs(runs.path(), 30).expect("list");
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].run_id, rows[1].run_id);
+        let again = vec![load_run(runs.path(), &rows[0].run_id).expect("load")];
+        assert_eq!(import_legacy(runs.path(), again).expect("second"), 0);
     }
 }
