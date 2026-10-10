@@ -1335,8 +1335,14 @@ main {
   color: var(--accent-strong);
 }
 
-.toggle-chip:focus-within {
-  outline: 2px solid var(--accent);
+/* Only keyboard focus draws a ring. :focus-within would also fire after a mouse
+   click and leave a border around a chip that was just switched on or off. */
+.toggle-chip input:focus-visible {
+  outline: none;
+}
+
+.toggle-chip:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
 
