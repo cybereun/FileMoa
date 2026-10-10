@@ -1,3 +1,4 @@
+use crate::progress::Ctl;
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -9,8 +10,12 @@ use std::{
 };
 use walkdir::{DirEntry, WalkDir};
 
-const PROJECT_MARKERS: &[&str] = &[
-    ".git",
+/// One of these alone means "this folder is a repository".
+const STRONG_PROJECT_MARKERS: &[&str] = &[".git", ".hg", ".svn"];
+
+/// Build/manifest files. A single one is common in a Downloads folder, so it
+/// only counts together with a second marker or a source folder.
+const PROJECT_FILE_MARKERS: &[&str] = &[
     "package.json",
     "requirements.txt",
     "pyproject.toml",
@@ -20,6 +25,24 @@ const PROJECT_MARKERS: &[&str] = &[
     "composer.json",
     "go.mod",
     "cmakelists.txt",
+    "gemfile",
+    "pubspec.yaml",
+    "deno.json",
+    "makefile",
+];
+
+/// Project files recognised by extension (Visual Studio and friends).
+const PROJECT_EXTENSIONS: &[&str] = &["sln", "csproj", "vbproj", "fsproj"];
+
+/// Folders that, next to one manifest file, make a project certain.
+const PROJECT_SOURCE_DIRS: &[&str] = &[
+    "src",
+    "lib",
+    "node_modules",
+    "target",
+    "venv",
+    ".venv",
+    "vendor",
 ];
 
 const TEMP_SUFFIXES: &[&str] = &[".crdownload", ".part", ".tmp", ".download"];
@@ -100,6 +123,10 @@ pub struct PlannedAction {
     pub modified_unix_secs: Option<u64>,
     #[serde(default)]
     pub collision: bool,
+    /// Folders this move had to create (shallowest first). Undo removes the
+    /// ones that are empty again; folders that already existed are never listed.
+    #[serde(default)]
+    pub created_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +148,12 @@ pub struct OrganizationPlan {
     pub mode: String,
     #[serde(default)]
     pub root_paths: Vec<String>,
+    /// Identifies the persisted run record/journal; empty until execution starts.
+    #[serde(default)]
+    pub run_id: String,
+    /// Handle to the plan kept by the backend; the UI sends only this to execute.
+    #[serde(default)]
+    pub plan_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,6 +172,44 @@ pub struct LargeFile {
     pub size_bytes: u64,
 }
 
+/// Scan output plus how many cloud-only files were left alone. Reading such a
+/// file (hashing) makes OneDrive/Drive download it, and listing it as "large"
+/// is misleading because it occupies no local space.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanResult<T> {
+    pub items: Vec<T>,
+    pub cloud_only_skipped: usize,
+}
+
+const FILE_ATTRIBUTE_OFFLINE: u32 = 0x1000;
+const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x4_0000;
+const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
+
+/// Placeholder/offline attributes set by cloud sync providers for files whose
+/// content is not stored locally.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn attributes_mean_cloud_only(attributes: u32) -> bool {
+    attributes
+        & (FILE_ATTRIBUTE_OFFLINE
+            | FILE_ATTRIBUTE_RECALL_ON_OPEN
+            | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+        != 0
+}
+
+fn is_cloud_only(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        attributes_mean_cloud_only(metadata.file_attributes())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
 fn is_english(language: &str) -> bool {
     language.eq_ignore_ascii_case("en")
 }
@@ -153,23 +224,41 @@ fn localised(language: &str, ko: &'static str, en: &'static str) -> &'static str
 
 fn builtin(ext: &str, language: &str, file_name: &str) -> (&'static str, &'static str) {
     let lower_name = file_name.to_ascii_lowercase();
-    let screenshot = ["screenshot", "snippingtool", "capture", "스크린샷", "캡처"]
-        .iter()
-        .any(|keyword| lower_name.contains(&keyword.to_ascii_lowercase()));
+    // Only an image can be a screenshot: `capture-tool.exe` or `screen
+    // capture.mp4` must keep their own category.
+    let is_image = matches!(
+        ext,
+        "jpg"
+            | "jpeg"
+            | "png"
+            | "gif"
+            | "webp"
+            | "bmp"
+            | "tiff"
+            | "tif"
+            | "heic"
+            | "heif"
+            | "avif"
+            | "jfif"
+    );
+    let screenshot = is_image
+        && ["screenshot", "snippingtool", "capture", "스크린샷", "캡처"]
+            .iter()
+            .any(|keyword| lower_name.contains(&keyword.to_ascii_lowercase()));
     match (ext, screenshot) {
         ("pdf", _) => (
             localised(language, "문서/PDF", "Documents/PDF"),
             localised(language, "PDF 문서", "PDF document"),
         ),
-        ("doc" | "docx", _) => (
+        ("doc" | "docx" | "odt", _) => (
             localised(language, "문서/Word", "Documents/Word"),
             localised(language, "Word 문서", "Word document"),
         ),
-        ("xls" | "xlsx" | "csv", _) => (
+        ("xls" | "xlsx" | "ods", _) => (
             localised(language, "문서/Excel", "Documents/Excel"),
             localised(language, "스프레드시트", "Spreadsheet"),
         ),
-        ("ppt" | "pptx", _) => (
+        ("ppt" | "pptx" | "odp", _) => (
             localised(language, "문서/PowerPoint", "Documents/PowerPoint"),
             localised(language, "프레젠테이션", "Presentation"),
         ),
@@ -177,7 +266,7 @@ fn builtin(ext: &str, language: &str, file_name: &str) -> (&'static str, &'stati
             localised(language, "문서/한글", "Documents/Hangul"),
             localised(language, "한글 문서", "Hangul document"),
         ),
-        ("txt" | "md" | "rtf", _) => (
+        ("txt" | "md" | "rtf" | "log", _) => (
             localised(language, "문서/텍스트", "Documents/Text"),
             localised(language, "텍스트 문서", "Text document"),
         ),
@@ -190,33 +279,42 @@ fn builtin(ext: &str, language: &str, file_name: &str) -> (&'static str, &'stati
             localised(language, "스크린샷", "Screenshot"),
         ),
         (
-            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "heic" | "avif" | "svg"
-            | "raw" | "cr2" | "nef" | "arw",
+            "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "heic" | "heif"
+            | "avif" | "jfif" | "svg" | "ico" | "psd" | "ai" | "raw" | "cr2" | "nef" | "arw"
+            | "dng",
             _,
         ) => (
             localised(language, "이미지", "Images"),
             localised(language, "이미지", "Image"),
         ),
-        ("mp4" | "mov" | "avi" | "mkv" | "wmv" | "webm" | "m4v" | "mts", _) => (
+        (
+            "mp4" | "mov" | "avi" | "mkv" | "wmv" | "webm" | "m4v" | "mts" | "mpg" | "mpeg" | "flv"
+            | "3gp",
+            _,
+        ) => (
             localised(language, "동영상", "Videos"),
             localised(language, "동영상", "Video"),
         ),
-        ("mp3" | "wav" | "flac" | "aac" | "m4a" | "ogg" | "wma", _) => (
+        ("mp3" | "wav" | "flac" | "aac" | "m4a" | "ogg" | "wma" | "opus" | "aiff" | "mid", _) => (
             localised(language, "오디오", "Audio"),
             localised(language, "오디오", "Audio"),
         ),
-        ("zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz", _) => (
+        ("zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "tgz" | "zst" | "cab" | "lz", _) => (
             localised(language, "압축파일", "Archives"),
             localised(language, "압축 파일", "Archive"),
         ),
-        ("exe" | "msi" | "msix" | "msixbundle" | "appx" | "appxbundle", _) => (
+        (
+            "exe" | "msi" | "msix" | "msixbundle" | "appx" | "appxbundle" | "msu" | "msp" | "dmg"
+            | "apk",
+            _,
+        ) => (
             localised(language, "설치파일", "Installers"),
             localised(language, "설치 파일", "Installer"),
         ),
         (
             "js" | "jsx" | "ts" | "tsx" | "html" | "css" | "scss" | "py" | "java" | "kt" | "cpp"
             | "c" | "cs" | "go" | "rs" | "php" | "sql" | "json" | "yaml" | "yml" | "toml" | "xml"
-            | "env" | "ipynb",
+            | "env" | "ipynb" | "bat" | "cmd" | "ps1" | "sh" | "vue",
             _,
         ) => (
             localised(language, "개발", "Development"),
@@ -230,7 +328,7 @@ fn builtin(ext: &str, language: &str, file_name: &str) -> (&'static str, &'stati
             localised(language, "디스크 이미지", "Disk images"),
             localised(language, "디스크 이미지", "Disk image"),
         ),
-        ("sqlite" | "db" | "parquet", _) => (
+        ("sqlite" | "db" | "parquet" | "csv" | "tsv" | "jsonl", _) => (
             localised(language, "데이터", "Data"),
             localised(language, "데이터 파일", "Data file"),
         ),
@@ -241,7 +339,7 @@ fn builtin(ext: &str, language: &str, file_name: &str) -> (&'static str, &'stati
     }
 }
 
-fn path_key(path: &Path) -> String {
+pub(crate) fn path_key(path: &Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
         .trim_end_matches('\\')
@@ -254,7 +352,44 @@ fn path_is_under(path: &Path, parent: &Path) -> bool {
     path == parent || path.starts_with(&(parent + "\\"))
 }
 
-fn protected(path: &Path) -> bool {
+/// Resolve 8.3 short names (`PROGRA~1`), junctions and symlinks so a protected
+/// folder cannot be reached under another spelling. Falls back to the input
+/// when the path does not exist.
+fn resolved(path: &Path) -> PathBuf {
+    let Ok(real) = fs::canonicalize(path) else {
+        return path.to_path_buf();
+    };
+    let text = real.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        real
+    }
+}
+
+/// Per-user and system folders from the environment, in resolved form.
+fn protected_environment_dirs() -> &'static [PathBuf] {
+    static DIRS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    DIRS.get_or_init(|| {
+        [
+            "APPDATA",
+            "LOCALAPPDATA",
+            "SystemRoot",
+            "windir",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramData",
+        ]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(|value| resolved(Path::new(&value)))
+        .collect()
+    })
+}
+
+fn protected_spelling(path: &Path) -> bool {
     let key = path_key(path);
     let component_match = |name: &str| {
         path.components().any(|component| {
@@ -271,27 +406,133 @@ fn protected(path: &Path) -> bool {
         || key.contains(":\\program files (x86)\\")
         || key.ends_with(":\\programdata")
         || key.contains(":\\programdata\\");
-    let app_data = std::env::var_os("APPDATA")
-        .into_iter()
-        .chain(std::env::var_os("LOCALAPPDATA"))
-        .map(|value| path_is_under(path, Path::new(&value)))
-        .any(|value| value);
+    let environment = protected_environment_dirs()
+        .iter()
+        .any(|dir| path_is_under(path, dir));
     system_root
         || program_root
-        || app_data
+        || environment
         || component_match(".git")
         || component_match("node_modules")
 }
 
-/// Shared safety check for commands that operate on paths selected in the UI.
+/// Cheap check used inside scan loops over many files.
+fn protected(path: &Path) -> bool {
+    protected_spelling(path)
+}
+
+/// Shared safety check for commands that operate on paths chosen in the UI.
+/// Also checks the resolved path, so short names and junctions do not bypass it.
 pub fn is_protected_path(path: &Path) -> bool {
-    protected(path)
+    protected_spelling(path) || protected_spelling(&resolved(path))
+}
+
+/// Top-level folders that hold system state on every drive.
+const PROTECTED_DRIVE_FOLDERS: &[&str] = &["$recycle.bin", "system volume information"];
+
+/// Top-level folders that are only system state on the Windows drive; on a
+/// data drive a folder called `Recovery` is usually the user's own.
+const PROTECTED_SYSTEM_DRIVE_FOLDERS: &[&str] = &[
+    "recovery",
+    "windows.old",
+    "boot",
+    "msocache",
+    "$windows.~bt",
+    "$windows.~ws",
+];
+
+fn on_system_drive(path: &Path) -> bool {
+    let drive = path_key(path).chars().take(2).collect::<String>();
+    std::env::var("SystemDrive")
+        .map(|system| system.to_ascii_lowercase() == drive)
+        .unwrap_or(false)
+}
+
+/// Why `root` may not be organised, if it may not. Checked on the resolved
+/// path: a drive root, the user profile or one of its parents, a system
+/// folder, or a protected location.
+pub(crate) fn root_rejection(root: &Path) -> Option<&'static str> {
+    let real = resolved(root);
+    for path in [root, real.as_path()] {
+        if path.parent().is_none() {
+            return Some("드라이브 루트는 정리할 수 없습니다. 하위 폴더를 선택하세요. / A drive root cannot be organised; pick a folder inside it.");
+        }
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            let profile = resolved(Path::new(&profile));
+            if path_is_under(&profile, path) {
+                return Some("사용자 폴더 전체(또는 그 상위 폴더)는 정리할 수 없습니다. 문서·다운로드 같은 하위 폴더를 선택하세요. / The whole user profile (or a parent of it) cannot be organised; pick a folder inside it.");
+            }
+        }
+        let first = path
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(name) => Some(name.to_string_lossy().to_lowercase()),
+                _ => None,
+            })
+            .next();
+        if first.as_deref().is_some_and(|name| {
+            PROTECTED_DRIVE_FOLDERS.contains(&name)
+                || (PROTECTED_SYSTEM_DRIVE_FOLDERS.contains(&name) && on_system_drive(path))
+        }) {
+            return Some("시스템 폴더는 정리할 수 없습니다. / System folders cannot be organised.");
+        }
+    }
+    (protected_spelling(root) || protected_spelling(&real)).then_some(
+        "보호된 시스템 또는 앱 데이터 경로는 정리할 수 없습니다. / Protected system or app-data path.",
+    )
 }
 
 fn project(path: &Path) -> bool {
-    PROJECT_MARKERS
+    if STRONG_PROJECT_MARKERS
         .iter()
         .any(|marker| path.join(marker).exists())
+    {
+        return true;
+    }
+    let mut markers = PROJECT_FILE_MARKERS
+        .iter()
+        .filter(|marker| path.join(marker).exists())
+        .count();
+    if markers < 2 {
+        // Directory listing is the expensive part; only needed when undecided.
+        markers += fs::read_dir(path)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| {
+                        entry
+                            .path()
+                            .extension()
+                            .and_then(|extension| extension.to_str())
+                            .is_some_and(|extension| {
+                                PROJECT_EXTENSIONS
+                                    .iter()
+                                    .any(|known| extension.eq_ignore_ascii_case(known))
+                            })
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+    }
+    markers >= 2
+        || (markers == 1
+            && PROJECT_SOURCE_DIRS
+                .iter()
+                .any(|name| path.join(name).is_dir()))
+}
+
+/// `project()` memoised per folder, because a scan asks about the same
+/// ancestors for every file beneath them.
+#[derive(Default)]
+struct ProjectCache(HashMap<PathBuf, bool>);
+
+impl ProjectCache {
+    fn is_project(&mut self, dir: &Path) -> bool {
+        *self
+            .0
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| project(dir))
+    }
 }
 
 pub(crate) fn sanitize_category(value: &str, language: &str) -> String {
@@ -424,6 +665,58 @@ fn metadata_time(metadata: &fs::Metadata, basis: &str) -> Option<DateTime<Local>
     Some(DateTime::<Local>::from(value))
 }
 
+/// Folder for the first letter of a file name: a Korean initial consonant
+/// (double consonants fold into their base), `A`-`Z`, `0-9`, or `#`.
+fn name_initial(file_name: &str) -> String {
+    const HANGUL_INITIALS: [&str; 19] = [
+        "ㄱ", "ㄱ", "ㄴ", "ㄷ", "ㄷ", "ㄹ", "ㅁ", "ㅂ", "ㅂ", "ㅅ", "ㅅ", "ㅇ", "ㅈ", "ㅈ", "ㅊ",
+        "ㅋ", "ㅌ", "ㅍ", "ㅎ",
+    ];
+    for character in file_name.chars() {
+        match character {
+            '가'..='힣' => {
+                let index = (character as u32 - '가' as u32) / 588;
+                return HANGUL_INITIALS[index as usize].to_string();
+            }
+            // Compatibility consonants typed on their own (ㅋㅋ.txt).
+            'ㄱ'..='ㅎ' => {
+                let folded = match character {
+                    'ㄲ' => 'ㄱ',
+                    'ㄸ' => 'ㄷ',
+                    'ㅃ' => 'ㅂ',
+                    'ㅆ' => 'ㅅ',
+                    'ㅉ' => 'ㅈ',
+                    other => other,
+                };
+                return folded.to_string();
+            }
+            letter if letter.is_ascii_alphabetic() => {
+                return letter.to_ascii_uppercase().to_string();
+            }
+            digit if digit.is_ascii_digit() => return "0-9".into(),
+            // Any other letter (kana, accents, ...) goes to the catch-all.
+            other if other.is_alphanumeric() => return "#".into(),
+            // Brackets, dots, spaces: look at the next character.
+            _ => {}
+        }
+    }
+    "#".into()
+}
+
+fn name_category(path: &Path, language: &str) -> String {
+    // The extension is not part of the name: `!!!.txt` must not become `T`.
+    let name = path
+        .file_stem()
+        .or_else(|| path.file_name())
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    format!(
+        "{}/{}",
+        localised(language, "이름", "Name"),
+        name_initial(&name)
+    )
+}
+
 fn size_category(size: u64, language: &str) -> String {
     let mb = 1024_u64 * 1024;
     let (label_ko, label_en) = if size <= mb {
@@ -448,10 +741,12 @@ fn category_for(path: &Path, metadata: &fs::Metadata, req: &PlanRequest) -> (Str
     if let Some((category, reason)) = keyword_category(path, &req.keyword_rules) {
         return (sanitize_category(&category, &req.language), reason);
     }
+    let mut date_missing = false;
     if req.basis.eq_ignore_ascii_case("date")
         || req.basis.eq_ignore_ascii_case("date_day")
         || req.basis.eq_ignore_ascii_case("year")
     {
+        date_missing = metadata_time(metadata, &req.date_basis).is_none();
         if let Some(date) = metadata_time(metadata, &req.date_basis) {
             let category = if req.basis.eq_ignore_ascii_case("year") {
                 date.format("%Y").to_string()
@@ -472,6 +767,17 @@ fn category_for(path: &Path, metadata: &fs::Metadata, req: &PlanRequest) -> (Str
             localised(&req.language, "파일 크기 기준", "Size-based rule").into(),
         );
     }
+    if req.basis.eq_ignore_ascii_case("name") {
+        return (
+            name_category(path, &req.language),
+            localised(
+                &req.language,
+                "파일명 첫 글자 기준",
+                "Filename-initial rule",
+            )
+            .into(),
+        );
+    }
     if let Some((category, reason)) = custom_category(path, &req.custom_categories) {
         return (sanitize_category(&category, &req.language), reason);
     }
@@ -480,7 +786,19 @@ fn category_for(path: &Path, metadata: &fs::Metadata, req: &PlanRequest) -> (Str
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_default();
     let (category, reason) = builtin(&extension(path), &req.language, &file_name);
-    (category.into(), reason.into())
+    let reason = if date_missing {
+        format!(
+            "{reason} · {}",
+            localised(
+                &req.language,
+                "날짜 정보를 읽지 못해 파일 형식으로 분류",
+                "no date available, used the file type"
+            )
+        )
+    } else {
+        reason.to_string()
+    };
+    (category.into(), reason)
 }
 
 fn is_hidden(entry: &DirEntry) -> bool {
@@ -620,26 +938,51 @@ fn root_warnings(root: &Path) -> Vec<String> {
     warnings
 }
 
+#[cfg(test)]
 pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
+    create_plan_ctl(req, &Ctl::none())
+}
+
+pub fn create_plan_ctl(req: PlanRequest, ctl: &Ctl) -> Result<OrganizationPlan, String> {
     let root = PathBuf::from(&req.root_path);
     if !root.is_dir() {
         return Err("선택한 폴더를 찾을 수 없습니다. / The selected folder does not exist.".into());
     }
-    if protected(&root) || project(&root) {
-        return Err("보호된 시스템 또는 개발 프로젝트 경로는 정리할 수 없습니다. / Protected system or development project path.".into());
+    if let Some(reason) = root_rejection(&root) {
+        return Err(reason.into());
+    }
+    if project(&root) {
+        return Err("개발 프로젝트 폴더는 정리할 수 없습니다. / Development project folders cannot be organised.".into());
     }
     let category_roots = planned_category_roots(&root, &req);
     let mut actions = Vec::new();
     let mut exclusions = Vec::new();
     let mut errors = Vec::new();
     let mut reserved_destinations = HashSet::new();
-    let warnings = root_warnings(&root);
+    let mut projects = ProjectCache::default();
+    let mut warnings = root_warnings(&root);
+    let date_based = ["date", "date_day", "year"]
+        .iter()
+        .any(|basis| req.basis.eq_ignore_ascii_case(basis));
+    if date_based && req.date_basis.eq_ignore_ascii_case("accessed") {
+        warnings.push(
+            localised(
+                &req.language,
+                "마지막 접근 날짜는 Windows 설정에 따라 갱신되지 않을 수 있어 결과가 부정확할 수 있습니다. 생성·수정 날짜를 권장합니다.",
+                "Last-accessed dates are often not maintained by Windows, so the result may be inaccurate. Created or modified dates are more reliable.",
+            )
+            .into(),
+        );
+    }
     let walker = if req.include_subfolders {
         WalkDir::new(&root).min_depth(1)
     } else {
         WalkDir::new(&root).min_depth(1).max_depth(1)
     };
+    let mut seen: u64 = 0;
     for item in walker {
+        ctl.check()?;
+        seen += 1;
         let entry = match item {
             Ok(entry) => entry,
             Err(error) => {
@@ -648,8 +991,9 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
             }
         };
         let path = entry.path();
+        ctl.report("scan", seen, 0, &path.to_string_lossy(), false);
         if entry.file_type().is_dir() {
-            if path != root && project(path) {
+            if path != root && projects.is_project(path) {
                 exclusions.push(format!(
                     "개발 프로젝트 보호 / Project protected: {}",
                     path.display()
@@ -660,11 +1004,9 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
         if !entry.file_type().is_file() {
             continue;
         }
-        if path
-            .ancestors()
-            .skip(1)
-            .any(|parent| parent != root && project(parent))
-        {
+        if path.ancestors().skip(1).any(|parent| {
+            parent != root && path_is_under(parent, &root) && projects.is_project(parent)
+        }) {
             continue;
         }
         if category_roots
@@ -731,6 +1073,7 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
             size_bytes: metadata.len(),
             modified_unix_secs,
             collision,
+            created_dirs: Vec::new(),
         });
     }
     Ok(OrganizationPlan {
@@ -744,19 +1087,24 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
         language: req.language,
         mode: req.mode,
         root_paths: vec![root.display().to_string()],
+        run_id: String::new(),
+        plan_id: String::new(),
     })
 }
 
 /// Build one dry-run snapshot for several independently selected roots. Each
 /// root is scanned with the same settings, while moves never cross root
 /// boundaries.
-pub fn create_multi_plan(requests: Vec<PlanRequest>) -> Result<OrganizationPlan, String> {
+pub fn create_multi_plan_ctl(
+    requests: Vec<PlanRequest>,
+    ctl: &Ctl,
+) -> Result<OrganizationPlan, String> {
     if requests.is_empty() {
         return Err("정리할 폴더를 하나 이상 선택하세요. / Select at least one folder.".into());
     }
     let mut plans = Vec::with_capacity(requests.len());
     for request in requests {
-        plans.push(create_plan(request)?);
+        plans.push(create_plan_ctl(request, ctl)?);
     }
     let language = plans[0].language.clone();
     let basis = plans[0].basis.clone();
@@ -792,62 +1140,301 @@ pub fn create_multi_plan(requests: Vec<PlanRequest>) -> Result<OrganizationPlan,
         language,
         mode,
         root_paths,
+        run_id: String::new(),
+        plan_id: String::new(),
     })
 }
 
-pub fn execute_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
+fn plan_roots(plan: &OrganizationPlan) -> Vec<PathBuf> {
+    if plan.root_paths.is_empty() {
+        plan.root_path.split('\n').map(PathBuf::from).collect()
+    } else {
+        plan.root_paths.iter().map(PathBuf::from).collect()
+    }
+}
+
+fn has_parent_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+}
+
+/// Why this move may not run, judged only from the plan's own folders: both
+/// ends must be absolute, free of `..`, inside the same chosen folder, and
+/// outside protected locations.
+fn path_blocker(action: &PlannedAction, roots: &[PathBuf]) -> Option<&'static str> {
+    let (source, destination) = (
+        Path::new(&action.source_path),
+        Path::new(&action.destination_path),
+    );
+    if !source.is_absolute() || !destination.is_absolute() {
+        return Some("전체 경로가 아니어서 거부됨 / rejected: not an absolute path");
+    }
+    if has_parent_component(source) || has_parent_component(destination) {
+        return Some("경로에 '..'가 있어 거부됨 / rejected: path contains '..'");
+    }
+    let Some(root) = roots.iter().find(|root| path_is_under(source, root)) else {
+        return Some(
+            "원본이 선택한 폴더 밖이라 거부됨 / rejected: source is outside the chosen folder",
+        );
+    };
+    if !path_is_under(destination, root) {
+        return Some(
+            "대상이 선택한 폴더 밖이라 거부됨 / rejected: destination is outside the chosen folder",
+        );
+    }
+    if protected_spelling(source) || protected_spelling(destination) {
+        return Some("보호된 경로라 거부됨 / rejected: protected path");
+    }
+    None
+}
+
+/// Whole seconds since the epoch, the resolution plans and scans compare on.
+pub(crate) fn modified_secs(metadata: &fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| value.as_secs())
+}
+
+/// Called with a plan the backend itself stored: skip files that changed
+/// since the preview, so the user approves exactly what is moved.
+pub fn mark_changed_since_preview(plan: &mut OrganizationPlan) {
+    for action in plan
+        .actions
+        .iter_mut()
+        .filter(|action| action.status == "proposed")
+    {
+        let Ok(metadata) = fs::metadata(&action.source_path) else {
+            continue; // a missing source is reported by the move itself
+        };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|value| value.as_secs());
+        let size_changed = metadata.len() != action.size_bytes;
+        let time_changed =
+            action.modified_unix_secs.is_some() && modified != action.modified_unix_secs;
+        if size_changed || time_changed {
+            action.status = "skipped".into();
+            action.reason =
+                "미리보기 이후 파일이 변경되어 건너뜀 / skipped: the file changed after the preview"
+                    .into();
+        }
+    }
+}
+
+/// Move `from` to `to` and fail with `AlreadyExists` instead of replacing a
+/// file that is already there. The check and the move are one OS call, so a
+/// file that appears between planning and moving (cloud sync, a finished
+/// download) can never be overwritten. `std::fs::rename` replaces on Windows.
+#[cfg(windows)]
+fn move_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    let wide = |path: &Path| -> Vec<u16> { path.as_os_str().encode_wide().chain([0]).collect() };
+    let (from, to) = (wide(from), wide(to));
+    // Flags 0: no MOVEFILE_REPLACE_EXISTING, no copy fallback across volumes.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn move_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    // hard_link refuses to replace an existing destination.
+    fs::hard_link(from, to)?;
+    fs::remove_file(from)
+}
+
+/// Move without overwriting, picking the next free `name (n).ext` when the
+/// destination turns out to be taken. Returns the final path and whether a
+/// rename was needed.
+fn move_with_unique_name(from: &Path, destination: PathBuf) -> io::Result<(PathBuf, bool)> {
+    let mut destination = destination;
+    let mut renamed = false;
+    for _ in 0..100 {
+        match move_no_replace(from, &destination) {
+            Ok(()) => return Ok((destination, renamed)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let (next, _) = safe_destination(destination.clone());
+                if next == destination {
+                    return Err(error);
+                }
+                destination = next;
+                renamed = true;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free destination name",
+    ))
+}
+
+/// Run the plan and report every action whose state changed through
+/// `on_action` right after it is settled, so callers can journal progress
+/// before the next file is touched. If `on_action` fails, no further file is
+/// moved: the remaining proposed actions are skipped and the error recorded.
+#[cfg(test)]
+pub fn execute_plan_with<F>(
+    plan: OrganizationPlan,
+    on_action: F,
+) -> Result<OrganizationPlan, String>
+where
+    F: FnMut(usize, &PlannedAction) -> Result<(), String>,
+{
+    execute_plan_ctl(plan, &Ctl::none(), on_action)
+}
+
+/// Like `execute_plan_with`, and stops after the file being moved when the
+/// user cancels: the rest is skipped and the run stays undoable.
+pub fn execute_plan_ctl<F>(
+    mut plan: OrganizationPlan,
+    ctl: &Ctl,
+    mut on_action: F,
+) -> Result<OrganizationPlan, String>
+where
+    F: FnMut(usize, &PlannedAction) -> Result<(), String>,
+{
+    let roots = plan_roots(&plan);
+    let total = plan
+        .actions
+        .iter()
+        .filter(|action| action.status == "proposed")
+        .count() as u64;
+    let mut done: u64 = 0;
     for index in 0..plan.actions.len() {
-        let action = &mut plan.actions[index];
-        if action.status != "proposed" {
+        if plan.actions[index].status != "proposed" {
             continue;
         }
-        let from_path = PathBuf::from(&action.source_path);
-        if !from_path.is_file() {
-            action.status = "skipped".into();
-            action.reason = "원본 파일이 없어 건너뜀 / source no longer exists".into();
-            continue;
-        }
-        let mut destination = PathBuf::from(&action.destination_path);
-        if path_key(&from_path) == path_key(&destination) {
-            action.status = "skipped".into();
-            continue;
-        }
-        if destination.exists() {
-            let (safe, collision) = safe_destination(destination.clone());
-            destination = safe;
-            action.collision = action.collision || collision;
-            action.destination_path = destination.display().to_string();
-        }
-        if let Some(parent) = destination.parent() {
-            if let Err(error) = fs::create_dir_all(parent) {
-                action.status = "failed".into();
-                action.reason =
-                    format!("폴더를 만들 수 없습니다 / cannot create destination folder: {error}");
-                plan.errors
-                    .push(format!("{}: {}", from_path.display(), action.reason));
-                continue;
+        if ctl.cancelled() {
+            for action in &mut plan.actions[index..] {
+                if action.status == "proposed" {
+                    action.status = "skipped".into();
+                    action.reason =
+                        "사용자가 취소하여 건너뜀 / skipped: cancelled by the user".into();
+                }
             }
+            break;
         }
-        match fs::rename(&from_path, &destination) {
-            Ok(_) => {
-                action.destination_path = destination.display().to_string();
-                action.status = "executed".into();
+        if let Some(reason) = path_blocker(&plan.actions[index], &roots) {
+            plan.actions[index].status = "skipped".into();
+            plan.actions[index].reason = reason.into();
+            plan.errors.push(format!(
+                "{}: {}",
+                plan.actions[index].source_path, plan.actions[index].reason
+            ));
+        } else {
+            run_action(&mut plan, index);
+        }
+        done += 1;
+        ctl.report(
+            "move",
+            done,
+            total,
+            &plan.actions[index].source_path,
+            done == total,
+        );
+        if let Err(error) = on_action(index, &plan.actions[index]) {
+            plan.errors.push(error);
+            for action in &mut plan.actions[index + 1..] {
+                if action.status == "proposed" {
+                    action.status = "skipped".into();
+                    action.reason =
+                        "기록을 쓸 수 없어 중단됨 / stopped: the run record could not be written"
+                            .into();
+                }
             }
-            Err(error) => {
-                action.status = "failed".into();
-                action.reason = format!("이동 실패 / move failed: {error}");
-                plan.errors
-                    .push(format!("{}: {}", from_path.display(), action.reason));
-            }
+            break;
         }
     }
     Ok(plan)
 }
 
+fn run_action(plan: &mut OrganizationPlan, index: usize) {
+    let action = &mut plan.actions[index];
+    let from_path = PathBuf::from(&action.source_path);
+    if !from_path.is_file() {
+        action.status = "skipped".into();
+        action.reason = "원본 파일이 없어 건너뜀 / source no longer exists".into();
+        return;
+    }
+    let destination = PathBuf::from(&action.destination_path);
+    if path_key(&from_path) == path_key(&destination) {
+        action.status = "skipped".into();
+        return;
+    }
+    let mut created_dirs = Vec::new();
+    if let Some(parent) = destination.parent() {
+        created_dirs = missing_ancestors(parent);
+        if let Err(error) = fs::create_dir_all(parent) {
+            remove_empty_dirs(&created_dirs);
+            action.status = "failed".into();
+            action.reason =
+                format!("폴더를 만들 수 없습니다 / cannot create destination folder: {error}");
+            plan.errors
+                .push(format!("{}: {}", from_path.display(), action.reason));
+            return;
+        }
+    }
+    match move_with_unique_name(&from_path, destination) {
+        Ok((destination, collision)) => {
+            action.collision = action.collision || collision;
+            action.destination_path = destination.display().to_string();
+            action.created_dirs = created_dirs
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect();
+            action.status = "executed".into();
+        }
+        Err(error) => {
+            remove_empty_dirs(&created_dirs);
+            action.status = "failed".into();
+            action.reason = format!("이동 실패 / move failed: {error}");
+            plan.errors
+                .push(format!("{}: {}", from_path.display(), action.reason));
+        }
+    }
+}
+
+/// Folders on the way to `dir` that do not exist yet, shallowest first.
+fn missing_ancestors(dir: &Path) -> Vec<PathBuf> {
+    let mut missing: Vec<PathBuf> = dir
+        .ancestors()
+        .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !ancestor.exists())
+        .map(Path::to_path_buf)
+        .collect();
+    missing.reverse();
+    missing
+}
+
+/// Remove folders that are empty, deepest first. `remove_dir` refuses a
+/// folder that still holds anything, so this can never delete user files.
+fn remove_empty_dirs(dirs: &[PathBuf]) {
+    let mut ordered: Vec<&PathBuf> = dirs.iter().collect();
+    ordered.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+    for dir in ordered {
+        let _ = fs::remove_dir(dir);
+    }
+}
+
 pub fn undo_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
+    let roots = plan_roots(&plan);
     for index in 0..plan.actions.len() {
         let action = &mut plan.actions[index];
         if action.status != "executed" {
+            continue;
+        }
+        if let Some(reason) = path_blocker(action, &roots) {
+            action.status = "undo_failed".into();
+            action.reason = reason.into();
+            plan.errors
+                .push(format!("{}: {}", action.destination_path, action.reason));
             continue;
         }
         let from = PathBuf::from(&action.destination_path);
@@ -876,8 +1463,16 @@ pub fn undo_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String>
                 continue;
             }
         }
-        match fs::rename(&from, &to) {
-            Ok(_) => action.status = "undone".into(),
+        match move_no_replace(&from, &to) {
+            Ok(()) => action.status = "undone".into(),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                // A file appeared at the original path after the check above.
+                action.status = "undo_conflict".into();
+                action.reason =
+                    "원래 위치에 새 파일이 있어 덮어쓰지 않음 / original path has a newer file"
+                        .into();
+                plan.errors.push(format!("Undo conflict: {}", to.display()));
+            }
             Err(error) => {
                 action.status = "undo_failed".into();
                 action.reason = format!("복원 실패 / restore failed: {error}");
@@ -886,21 +1481,53 @@ pub fn undo_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String>
             }
         }
     }
+    // Only after every file is back: a folder can be shared by several moves.
+    let created: Vec<PathBuf> = plan
+        .actions
+        .iter()
+        .filter(|action| action.status == "undone")
+        .flat_map(|action| action.created_dirs.iter().map(PathBuf::from))
+        .collect();
+    remove_empty_dirs(&created);
     Ok(plan)
 }
 
+#[cfg(test)]
 fn hash_file(path: &Path) -> io::Result<String> {
+    hash_prefix(path, u64::MAX, &Ctl::none(), &|_| {})
+}
+
+/// SHA-256 of the first `limit` bytes (the whole file for `u64::MAX`).
+/// `on_bytes` sees every chunk so progress can be bytes-accurate, and a
+/// cancel is noticed between chunks.
+fn hash_prefix(
+    path: &Path,
+    limit: u64,
+    ctl: &Ctl,
+    on_bytes: &(dyn Fn(u64) + Sync),
+) -> io::Result<String> {
+    // Last line of defence: opening a placeholder for reading downloads it.
+    if is_cloud_only(&fs::metadata(path)?) {
+        return Err(io::Error::other("cloud-only file is not read"));
+    }
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
-    // Tauri IPC workers use relatively small stacks on Windows. Keep the
-    // streaming buffer on the heap so a duplicate scan cannot overflow one.
+    // Worker threads have small stacks on Windows. Keep the streaming buffer
+    // on the heap so a duplicate scan cannot overflow one.
     let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
+    let mut remaining = limit;
+    while remaining > 0 {
+        if ctl.cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let want = remaining.min(buffer.len() as u64) as usize;
+        let read = file.read(&mut buffer[..want])?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
+        on_bytes(read as u64);
+        remaining -= read as u64;
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
@@ -914,18 +1541,73 @@ fn scan_entries(root: &str, sub: bool) -> impl Iterator<Item = Result<DirEntry, 
     walk.into_iter()
 }
 
-pub fn find_duplicates(root: &str, sub: bool) -> Result<Vec<DuplicateGroup>, String> {
+/// Files this large or smaller are fully covered by the quick hash.
+const QUICK_BYTES: u64 = 64 * 1024;
+
+/// Run `work` over `items` on a few threads, keeping the input order.
+fn parallel_map<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    };
+    let threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(2)
+        .clamp(1, 4)
+        .min(items.len().max(1));
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<(usize, R)>> = Mutex::new(Vec::with_capacity(items.len()));
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::SeqCst);
+                if index >= items.len() {
+                    break;
+                }
+                let value = work(&items[index]);
+                results
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((index, value));
+            });
+        }
+    });
+    let mut ordered = results
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ordered.sort_by_key(|(index, _)| *index);
+    ordered.into_iter().map(|(_, value)| value).collect()
+}
+
+#[cfg(test)]
+pub fn find_duplicates(root: &str, sub: bool) -> Result<ScanResult<DuplicateGroup>, String> {
+    find_duplicates_ctl(root, sub, &Ctl::none())
+}
+
+/// Size groups first, then a hash of the first 64 KB, then the full SHA-256
+/// only for files that still look identical. Hashing runs on a few threads.
+pub fn find_duplicates_ctl(
+    root: &str,
+    sub: bool,
+    ctl: &Ctl,
+) -> Result<ScanResult<DuplicateGroup>, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
     if !Path::new(root).is_dir() {
         return Err(format!(
             "중복 파일을 찾을 폴더를 찾을 수 없습니다 / duplicate scan folder not found: {root}"
         ));
     }
     let mut sizes: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    let mut cloud_only_skipped = 0;
+    let mut seen: u64 = 0;
     for item in scan_entries(root, sub) {
+        ctl.check()?;
         let entry = match item {
             Ok(entry) => entry,
             Err(_) => continue,
         };
+        seen += 1;
+        ctl.report("scan", seen, 0, &entry.path().to_string_lossy(), false);
         if !entry.file_type().is_file() || protected(entry.path()) {
             continue;
         }
@@ -933,52 +1615,141 @@ pub fn find_duplicates(root: &str, sub: bool) -> Result<Vec<DuplicateGroup>, Str
             continue;
         }
         if let Ok(metadata) = entry.metadata() {
+            if is_cloud_only(&metadata) {
+                cloud_only_skipped += 1;
+                continue;
+            }
             sizes
                 .entry(metadata.len())
                 .or_default()
                 .push(entry.into_path());
         }
     }
+
+    // Stage 1: a hash of the first 64 KB separates almost everything that
+    // merely shares a size, at a tiny fraction of the reading.
+    let candidates: Vec<(u64, PathBuf)> = sizes
+        .into_iter()
+        .filter(|(_, files)| files.len() >= 2)
+        .flat_map(|(size, files)| files.into_iter().map(move |path| (size, path)))
+        .collect();
+    let quick_done = AtomicU64::new(0);
+    let quick_total = candidates.len() as u64;
+    let quick = parallel_map(&candidates, |(size, path)| {
+        let hash = hash_prefix(path, (*size).min(QUICK_BYTES), ctl, &|_| {}).ok();
+        let done = quick_done.fetch_add(1, Ordering::Relaxed) + 1;
+        ctl.report(
+            "quick",
+            done,
+            quick_total,
+            &path.to_string_lossy(),
+            done == quick_total,
+        );
+        hash
+    });
+    ctl.check()?;
+    let mut buckets: HashMap<(u64, String), Vec<PathBuf>> = HashMap::new();
+    for ((size, path), hash) in candidates.into_iter().zip(quick) {
+        if let Some(hash) = hash {
+            buckets.entry((size, hash)).or_default().push(path);
+        }
+    }
+
+    // Stage 2: the full SHA-256, only where the quick hashes agree. Files up
+    // to 64 KB are already fully hashed.
     let mut groups = Vec::new();
-    for (size, files) in sizes {
+    let mut need_full: Vec<(u64, PathBuf)> = Vec::new();
+    for ((size, hash), files) in &buckets {
         if files.len() < 2 {
             continue;
         }
-        let mut hashes: HashMap<String, Vec<String>> = HashMap::new();
-        for path in files {
-            if let Ok(hash) = hash_file(&path) {
-                hashes
-                    .entry(hash)
-                    .or_default()
-                    .push(path.display().to_string());
-            }
-        }
-        for (hash, paths) in hashes {
-            if paths.len() > 1 {
-                groups.push(DuplicateGroup {
-                    hash,
-                    size_bytes: size,
-                    reclaimable_bytes: size.saturating_mul(paths.len() as u64 - 1),
-                    file_paths: paths,
-                });
-            }
+        if *size <= QUICK_BYTES {
+            groups.push(DuplicateGroup {
+                hash: hash.clone(),
+                size_bytes: *size,
+                reclaimable_bytes: size.saturating_mul(files.len() as u64 - 1),
+                file_paths: files
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+            });
+        } else {
+            need_full.extend(files.iter().map(|path| (*size, path.clone())));
         }
     }
-    groups.sort_by(|left, right| right.reclaimable_bytes.cmp(&left.reclaimable_bytes));
-    Ok(groups)
+    let full_total: u64 = need_full.iter().map(|(size, _)| *size).sum();
+    let full_done = AtomicU64::new(0);
+    let full = parallel_map(&need_full, |(_, path)| {
+        let name = path.to_string_lossy();
+        hash_prefix(path, u64::MAX, ctl, &|bytes| {
+            let done = full_done.fetch_add(bytes, Ordering::Relaxed) + bytes;
+            ctl.report("hash", done, full_total, &name, false);
+        })
+        .ok()
+    });
+    ctl.check()?;
+    ctl.report("hash", full_total, full_total, "", true);
+    let mut by_hash: HashMap<(u64, String), Vec<String>> = HashMap::new();
+    for ((size, path), hash) in need_full.into_iter().zip(full) {
+        if let Some(hash) = hash {
+            by_hash
+                .entry((size, hash))
+                .or_default()
+                .push(path.display().to_string());
+        }
+    }
+    for ((size, hash), paths) in by_hash {
+        if paths.len() > 1 {
+            groups.push(DuplicateGroup {
+                hash,
+                size_bytes: size,
+                reclaimable_bytes: size.saturating_mul(paths.len() as u64 - 1),
+                file_paths: paths,
+            });
+        }
+    }
+    // Stable order: biggest saving first, then by hash so runs are repeatable.
+    groups.sort_by(|left, right| {
+        right
+            .reclaimable_bytes
+            .cmp(&left.reclaimable_bytes)
+            .then_with(|| left.hash.cmp(&right.hash))
+    });
+    for group in &mut groups {
+        group.file_paths.sort();
+    }
+    Ok(ScanResult {
+        items: groups,
+        cloud_only_skipped,
+    })
 }
 
+#[cfg(test)]
 pub fn find_large_files(
     root: &str,
     sub: bool,
     minimum_size_bytes: u64,
-) -> Result<Vec<LargeFile>, String> {
+) -> Result<ScanResult<LargeFile>, String> {
+    find_large_files_ctl(root, sub, minimum_size_bytes, &Ctl::none())
+}
+
+pub fn find_large_files_ctl(
+    root: &str,
+    sub: bool,
+    minimum_size_bytes: u64,
+    ctl: &Ctl,
+) -> Result<ScanResult<LargeFile>, String> {
     let mut files = Vec::new();
+    let mut cloud_only_skipped = 0;
+    let mut seen: u64 = 0;
     for item in scan_entries(root, sub) {
+        ctl.check()?;
         let entry = match item {
             Ok(entry) => entry,
             Err(_) => continue,
         };
+        seen += 1;
+        ctl.report("scan", seen, 0, &entry.path().to_string_lossy(), false);
         if !entry.file_type().is_file() || protected(entry.path()) {
             continue;
         }
@@ -986,6 +1757,10 @@ pub fn find_large_files(
             continue;
         }
         if let Ok(metadata) = entry.metadata() {
+            if is_cloud_only(&metadata) {
+                cloud_only_skipped += 1;
+                continue;
+            }
             if metadata.len() >= minimum_size_bytes {
                 files.push(LargeFile {
                     path: entry.path().display().to_string(),
@@ -995,16 +1770,28 @@ pub fn find_large_files(
         }
     }
     files.sort_by(|left, right| right.size_bytes.cmp(&left.size_bytes));
-    Ok(files)
+    Ok(ScanResult {
+        items: files,
+        cloud_only_skipped,
+    })
 }
 
+#[cfg(test)]
 pub fn find_empty_folders(root: &str, sub: bool) -> Result<Vec<String>, String> {
+    find_empty_folders_ctl(root, sub, &Ctl::none())
+}
+
+pub fn find_empty_folders_ctl(root: &str, sub: bool, ctl: &Ctl) -> Result<Vec<String>, String> {
     let mut folders = Vec::new();
+    let mut seen: u64 = 0;
     for item in scan_entries(root, sub) {
+        ctl.check()?;
         let entry = match item {
             Ok(entry) => entry,
             Err(_) => continue,
         };
+        seen += 1;
+        ctl.report("scan", seen, 0, &entry.path().to_string_lossy(), false);
         if !entry.file_type().is_dir()
             || entry.path() == Path::new(root)
             || protected(entry.path())
@@ -1030,7 +1817,16 @@ pub fn find_empty_folders(root: &str, sub: bool) -> Result<Vec<String>, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+
+    /// The system temp folder lives under %LOCALAPPDATA%, which the planner
+    /// rightly refuses to organize. Keep test folders inside the build tree.
+    fn tempdir() -> io::Result<tempfile::TempDir> {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp");
+        fs::create_dir_all(&base)?;
+        tempfile::Builder::new().tempdir_in(base)
+    }
 
     fn request(root: &Path) -> PlanRequest {
         PlanRequest {
@@ -1105,7 +1901,9 @@ mod tests {
         let directory = tempdir().expect("temp directory");
         fs::write(directory.path().join("a.txt"), b"same").expect("a");
         fs::write(directory.path().join("b.txt"), b"same").expect("b");
-        let groups = find_duplicates(&directory.path().display().to_string(), false).expect("scan");
+        let groups = find_duplicates(&directory.path().display().to_string(), false)
+            .expect("scan")
+            .items;
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].file_paths.len(), 2);
         assert_eq!(groups[0].hash.len(), 64);
@@ -1175,6 +1973,7 @@ mod tests {
                 size_bytes: 5,
                 modified_unix_secs: None,
                 collision: false,
+                created_dirs: Vec::new(),
             }],
             exclusions: Vec::new(),
             errors: Vec::new(),
@@ -1184,10 +1983,668 @@ mod tests {
             language: "ko".into(),
             mode: "safe".into(),
             root_paths: vec![directory.path().display().to_string()],
+            run_id: String::new(),
+            plan_id: String::new(),
         };
         let result = undo_plan(plan).expect("undo");
         assert_eq!(result.actions[0].status, "undo_conflict");
         assert_eq!(fs::read(&original).unwrap(), b"newer");
         assert!(moved.exists());
+    }
+
+    #[test]
+    fn move_no_replace_never_overwrites_an_existing_file() {
+        let directory = tempdir().expect("temp directory");
+        let from = directory.path().join("from.txt");
+        let to = directory.path().join("to.txt");
+        fs::write(&from, b"incoming").expect("from");
+        fs::write(&to, b"existing").expect("to");
+        let error = move_no_replace(&from, &to).expect_err("must refuse");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&from).unwrap(), b"incoming");
+        assert_eq!(fs::read(&to).unwrap(), b"existing");
+
+        let free = directory.path().join("free.txt");
+        move_no_replace(&from, &free).expect("move to a free name");
+        assert!(!from.exists());
+        assert_eq!(fs::read(&free).unwrap(), b"incoming");
+    }
+
+    #[test]
+    fn move_with_unique_name_numbers_a_taken_destination() {
+        let directory = tempdir().expect("temp directory");
+        let from = directory.path().join("from.txt");
+        let taken = directory.path().join("a.txt");
+        fs::write(&from, b"incoming").expect("from");
+        fs::write(&taken, b"existing").expect("taken");
+        let (moved, renamed) = move_with_unique_name(&from, taken.clone()).expect("move");
+        assert!(renamed);
+        assert_eq!(moved, directory.path().join("a (1).txt"));
+        assert_eq!(fs::read(&taken).unwrap(), b"existing");
+        assert_eq!(fs::read(&moved).unwrap(), b"incoming");
+    }
+
+    #[test]
+    fn execute_keeps_a_file_that_appeared_after_planning() {
+        let directory = tempdir().expect("temp directory");
+        let source = directory.path().join("a.txt");
+        let destination = directory.path().join("문서").join("a.txt");
+        fs::write(&source, b"incoming").expect("source");
+        let plan = OrganizationPlan {
+            root_path: directory.path().display().to_string(),
+            actions: vec![PlannedAction {
+                source_path: source.display().to_string(),
+                destination_path: destination.display().to_string(),
+                category: "문서".into(),
+                reason: "test".into(),
+                status: "proposed".into(),
+                size_bytes: 8,
+                modified_unix_secs: None,
+                collision: false,
+                created_dirs: Vec::new(),
+            }],
+            exclusions: Vec::new(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            created_at: Utc::now().to_rfc3339(),
+            basis: "type".into(),
+            language: "ko".into(),
+            mode: "safe".into(),
+            root_paths: vec![directory.path().display().to_string()],
+            run_id: String::new(),
+            plan_id: String::new(),
+        };
+        // The file shows up after the preview was built, before execution.
+        fs::create_dir_all(destination.parent().unwrap()).expect("category");
+        fs::write(&destination, b"arrived later").expect("late file");
+        let done = execute_plan_with(plan, |_, _| Ok(())).expect("execute");
+        assert_eq!(done.actions[0].status, "executed");
+        assert!(done.actions[0].collision);
+        assert_eq!(fs::read(&destination).unwrap(), b"arrived later");
+        let renamed = PathBuf::from(&done.actions[0].destination_path);
+        assert_ne!(renamed, destination);
+        assert_eq!(fs::read(&renamed).unwrap(), b"incoming");
+    }
+
+    #[test]
+    fn cloud_placeholder_attributes_are_recognised() {
+        assert!(attributes_mean_cloud_only(0x40_0000)); // RECALL_ON_DATA_ACCESS
+        assert!(attributes_mean_cloud_only(0x4_0000)); // RECALL_ON_OPEN
+        assert!(attributes_mean_cloud_only(0x1000 | 0x20)); // OFFLINE + ARCHIVE
+        assert!(!attributes_mean_cloud_only(0x20)); // ARCHIVE only
+        assert!(!attributes_mean_cloud_only(0));
+    }
+
+    #[cfg(windows)]
+    fn mark_offline(path: &Path) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::SetFileAttributesW;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        // FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_ARCHIVE
+        assert_ne!(
+            unsafe { SetFileAttributesW(wide.as_ptr(), 0x1000 | 0x20) },
+            0
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scans_leave_cloud_only_files_alone_and_count_them() {
+        let directory = tempdir().expect("temp directory");
+        let local_a = directory.path().join("local-a.bin");
+        let local_b = directory.path().join("local-b.bin");
+        let cloud_a = directory.path().join("cloud-a.bin");
+        let cloud_b = directory.path().join("cloud-b.bin");
+        for path in [&local_a, &local_b, &cloud_a, &cloud_b] {
+            fs::write(path, vec![9_u8; 4096]).expect("file");
+        }
+        mark_offline(&cloud_a);
+        mark_offline(&cloud_b);
+        let root = directory.path().display().to_string();
+
+        let duplicates = find_duplicates(&root, false).expect("duplicates");
+        assert_eq!(duplicates.cloud_only_skipped, 2);
+        assert_eq!(duplicates.items.len(), 1);
+        let paths = &duplicates.items[0].file_paths;
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().all(|path| path.contains("local-")));
+
+        let large = find_large_files(&root, false, 1024).expect("large");
+        assert_eq!(large.cloud_only_skipped, 2);
+        assert_eq!(large.items.len(), 2);
+        assert!(hash_file(&cloud_a).is_err());
+        assert!(hash_file(&local_a).is_ok());
+    }
+
+    fn plan_with(root: &Path, pairs: &[(&Path, &Path)]) -> OrganizationPlan {
+        OrganizationPlan {
+            root_path: root.display().to_string(),
+            actions: pairs
+                .iter()
+                .map(|(source, destination)| PlannedAction {
+                    source_path: source.display().to_string(),
+                    destination_path: destination.display().to_string(),
+                    category: "Test".into(),
+                    reason: "test".into(),
+                    status: "proposed".into(),
+                    size_bytes: 1,
+                    modified_unix_secs: None,
+                    collision: false,
+                    created_dirs: Vec::new(),
+                })
+                .collect(),
+            exclusions: Vec::new(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            created_at: Utc::now().to_rfc3339(),
+            basis: "type".into(),
+            language: "ko".into(),
+            mode: "safe".into(),
+            root_paths: vec![root.display().to_string()],
+            run_id: String::new(),
+            plan_id: String::new(),
+        }
+    }
+
+    #[test]
+    fn undo_removes_only_the_folders_the_run_created() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let (a, b, c) = (root.join("a.txt"), root.join("b.txt"), root.join("c.txt"));
+        for file in [&a, &b, &c] {
+            fs::write(file, b"x").expect("source");
+        }
+        // `Kept` existed before the run (and is empty); `Docs/Text` is new and shared.
+        fs::create_dir_all(root.join("Kept")).expect("pre-existing folder");
+        let plan = plan_with(
+            root,
+            &[
+                (&a, &root.join("Docs").join("Text").join("a.txt")),
+                (&b, &root.join("Docs").join("Text").join("b.txt")),
+                (&c, &root.join("Kept").join("c.txt")),
+            ],
+        );
+        let done = execute_plan_with(plan, |_, _| Ok(())).expect("execute");
+        assert_eq!(done.actions[0].created_dirs.len(), 2); // Docs, Docs/Text
+        assert!(done.actions[1].created_dirs.is_empty()); // folder already made by the first move
+        assert!(done.actions[2].created_dirs.is_empty()); // Kept pre-existed
+
+        let undone = undo_plan(done).expect("undo");
+        assert!(undone
+            .actions
+            .iter()
+            .all(|action| action.status == "undone"));
+        assert!(a.is_file() && b.is_file() && c.is_file());
+        assert!(!root.join("Docs").exists(), "new folders are cleaned up");
+        assert!(root.join("Kept").is_dir(), "a folder the user had stays");
+    }
+
+    #[test]
+    fn undo_keeps_a_created_folder_that_now_holds_other_files() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let a = root.join("a.txt");
+        fs::write(&a, b"x").expect("source");
+        let plan = plan_with(root, &[(&a, &root.join("Docs").join("a.txt"))]);
+        let done = execute_plan_with(plan, |_, _| Ok(())).expect("execute");
+        fs::write(root.join("Docs").join("mine.txt"), b"keep me").expect("user file");
+        undo_plan(done).expect("undo");
+        assert!(a.is_file());
+        assert_eq!(
+            fs::read(root.join("Docs").join("mine.txt")).unwrap(),
+            b"keep me"
+        );
+    }
+
+    #[test]
+    fn a_failed_move_does_not_leave_the_folders_it_created() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let missing = root.join("not-there.txt");
+        // The source vanished before execution: nothing may be created.
+        let plan = plan_with(root, &[(&missing, &root.join("Docs").join("x.txt"))]);
+        let done = execute_plan_with(plan, |_, _| Ok(())).expect("execute");
+        assert_eq!(done.actions[0].status, "skipped");
+        assert!(!root.join("Docs").exists());
+    }
+
+    #[test]
+    fn drive_roots_profile_and_system_folders_cannot_be_organised() {
+        assert!(root_rejection(Path::new("C:\\")).is_some());
+        assert!(root_rejection(Path::new("D:\\")).is_some());
+        assert!(root_rejection(Path::new(r"C:\$Recycle.Bin")).is_some());
+        assert!(root_rejection(Path::new(r"E:\System Volume Information")).is_some());
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            let profile = PathBuf::from(profile);
+            assert!(
+                root_rejection(&profile).is_some(),
+                "the profile root itself"
+            );
+            if let Some(parent) = profile.parent() {
+                assert!(root_rejection(parent).is_some(), "a parent of the profile");
+            }
+            // A folder inside the profile is fine (it is not under AppData).
+            assert!(root_rejection(&profile.join("Downloads")).is_none());
+        }
+    }
+
+    #[test]
+    fn data_drive_folders_named_like_system_folders_are_allowed() {
+        // `Recovery` is only special on the Windows drive.
+        let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        let other = if system.to_ascii_lowercase().starts_with('d') {
+            "E:"
+        } else {
+            "D:"
+        };
+        assert!(root_rejection(Path::new(&format!(r"{other}\Recovery\mine"))).is_none());
+        assert!(root_rejection(Path::new(&format!(r"{system}\Recovery"))).is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn short_8_3_names_do_not_bypass_protection() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        // "Program Files" has a distinct 8.3 alias (PROGRA~1) when the volume keeps them.
+        let long = PathBuf::from(std::env::var_os("ProgramFiles").expect("ProgramFiles"));
+        let wide: Vec<u16> = long.as_os_str().encode_wide().chain([0]).collect();
+        let mut buffer = vec![0_u16; 1024];
+        let length =
+            unsafe { GetShortPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) };
+        assert!(length > 0, "GetShortPathNameW failed");
+        let short = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+        if path_key(&short) == path_key(&long) {
+            eprintln!("8.3 names are disabled on this volume; bypass cannot be exercised");
+            return;
+        }
+        // The spelling alone no longer matches, so only resolution can catch it.
+        assert!(!path_is_under(&short, &long));
+        assert!(
+            is_protected_path(&short),
+            "{short:?} must resolve to {long:?}"
+        );
+        assert!(root_rejection(&short).is_some());
+    }
+
+    fn touch(dir: &Path, name: &str) {
+        fs::create_dir_all(dir).expect("dir");
+        fs::write(dir.join(name), b"x").expect("file");
+    }
+
+    #[test]
+    fn one_stray_manifest_is_not_a_project() {
+        let directory = tempdir().expect("temp directory");
+        for lone in ["package.json", "requirements.txt", "Makefile", "app.sln"] {
+            let dir = directory.path().join(lone.replace('.', "_"));
+            touch(&dir, lone);
+            assert!(!project(&dir), "{lone} alone must not protect the folder");
+        }
+    }
+
+    #[test]
+    fn repositories_and_real_projects_are_detected() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        fs::create_dir_all(root.join("repo").join(".git")).expect("git");
+        assert!(project(&root.join("repo")), "a .git folder");
+        fs::create_dir_all(root.join("svn").join(".svn")).expect("svn");
+        assert!(project(&root.join("svn")), "a .svn folder");
+
+        touch(&root.join("two"), "package.json");
+        touch(&root.join("two"), "requirements.txt");
+        assert!(project(&root.join("two")), "two manifests");
+
+        touch(&root.join("withsrc"), "go.mod");
+        fs::create_dir_all(root.join("withsrc").join("src")).expect("src");
+        assert!(project(&root.join("withsrc")), "a manifest plus src");
+
+        touch(&root.join("vs"), "app.sln");
+        touch(&root.join("vs"), "app.csproj");
+        assert!(project(&root.join("vs")), "solution plus project file");
+    }
+
+    #[test]
+    fn a_stray_package_json_no_longer_blocks_organising_the_folder() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        fs::write(root.join("package.json"), b"{}").expect("manifest");
+        fs::write(root.join("photo.png"), b"png").expect("photo");
+        // A real project below the root is still left alone.
+        touch(&root.join("app"), "package.json");
+        touch(&root.join("app"), "requirements.txt");
+        fs::write(root.join("app").join("notes.txt"), b"keep").expect("inside project");
+
+        let mut req = request(root);
+        req.include_subfolders = true;
+        let plan = create_plan(req).expect("plan");
+        let moved: Vec<String> = plan
+            .actions
+            .iter()
+            .map(|action| action.source_path.clone())
+            .collect();
+        assert!(moved.iter().any(|path| path.ends_with("photo.png")));
+        assert!(moved.iter().any(|path| path.ends_with("package.json")));
+        assert!(
+            !moved.iter().any(|path| path.contains("app")),
+            "files inside the real project stay put: {moved:?}"
+        );
+        assert!(plan.exclusions.iter().any(|note| note.contains("app")));
+    }
+
+    #[test]
+    fn execution_refuses_paths_outside_the_chosen_folder() {
+        let directory = tempdir().expect("temp directory");
+        let outside = tempdir().expect("outside");
+        let root = directory.path();
+        let inside_file = root.join("a.txt");
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&inside_file, b"a").expect("inside");
+        fs::write(&outside_file, b"secret").expect("outside");
+        let escape = root.join("..").join("escaped.txt");
+        let plan = plan_with(
+            root,
+            &[
+                (&outside_file, &root.join("Docs").join("secret.txt")), // source outside the folder
+                (&inside_file, &outside.path().join("a.txt")),          // destination outside
+                (&inside_file, &escape),                                // `..` traversal
+            ],
+        );
+        let done = execute_plan_with(plan, |_, _| Ok(())).expect("execute");
+        assert!(
+            done.actions.iter().all(|action| action.status == "skipped"),
+            "{:?}",
+            done.actions.iter().map(|a| &a.reason).collect::<Vec<_>>()
+        );
+        assert!(outside_file.is_file() && inside_file.is_file());
+        assert!(!outside.path().join("a.txt").exists());
+        assert!(!root.join("..").join("escaped.txt").exists());
+    }
+
+    #[test]
+    fn undo_refuses_a_record_that_points_outside_the_folder() {
+        let directory = tempdir().expect("temp directory");
+        let outside = tempdir().expect("outside");
+        let root = directory.path();
+        let moved = root.join("Docs").join("a.txt");
+        fs::create_dir_all(moved.parent().unwrap()).expect("folder");
+        fs::write(&moved, b"a").expect("moved");
+        let planted = outside.path().join("restored.txt");
+        let mut plan = plan_with(root, &[(&planted, &moved)]);
+        plan.actions[0].status = "executed".into();
+        let undone = undo_plan(plan).expect("undo");
+        assert_eq!(undone.actions[0].status, "undo_failed");
+        assert!(moved.is_file(), "the file was not touched");
+        assert!(!planted.exists());
+    }
+
+    #[test]
+    fn files_changed_after_the_preview_are_skipped() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let (kept, edited) = (root.join("kept.txt"), root.join("edited.txt"));
+        fs::write(&kept, b"same").expect("kept");
+        fs::write(&edited, b"before").expect("edited");
+        let mut plan = create_plan(request(root)).expect("plan");
+        assert_eq!(plan.actions.len(), 2);
+        fs::write(&edited, b"edited after the preview, now longer").expect("edit");
+        mark_changed_since_preview(&mut plan);
+        let status = |name: &str| {
+            plan.actions
+                .iter()
+                .find(|action| action.source_path.ends_with(name))
+                .map(|action| action.status.clone())
+                .unwrap()
+        };
+        assert_eq!(status("kept.txt"), "proposed");
+        assert_eq!(status("edited.txt"), "skipped");
+    }
+
+    #[test]
+    fn same_size_and_same_first_64kb_but_different_tail_are_not_duplicates() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let size = 300 * 1024;
+        let mut a = vec![1_u8; size];
+        let mut b = a.clone();
+        let c = a.clone();
+        a[size - 1] = 2; // differs only in the last byte, far past the quick hash
+        b[size - 1] = 3;
+        fs::write(root.join("a.bin"), &a).expect("a");
+        fs::write(root.join("b.bin"), &b).expect("b");
+        fs::write(root.join("c1.bin"), &c).expect("c1");
+        fs::write(root.join("c2.bin"), &c).expect("c2");
+        // Small files are fully covered by the quick hash.
+        fs::write(root.join("s1.txt"), b"tiny").expect("s1");
+        fs::write(root.join("s2.txt"), b"tiny").expect("s2");
+
+        let found = find_duplicates(&root.display().to_string(), false)
+            .expect("scan")
+            .items;
+        assert_eq!(found.len(), 2, "{found:?}");
+        let big = found
+            .iter()
+            .find(|group| group.size_bytes == size as u64)
+            .expect("big group");
+        assert_eq!(big.file_paths.len(), 2);
+        assert!(big
+            .file_paths
+            .iter()
+            .all(|path| path.contains("c1") || path.contains("c2")));
+        assert_eq!(big.hash.len(), 64, "a full SHA-256, not the quick one");
+        let small = found
+            .iter()
+            .find(|group| group.size_bytes == 4)
+            .expect("small group");
+        assert_eq!(small.file_paths.len(), 2);
+        assert_eq!(small.hash.len(), 64);
+    }
+
+    #[test]
+    fn duplicate_results_are_stable_across_runs() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        for index in 0..12 {
+            fs::write(
+                root.join(format!("x{index}.bin")),
+                vec![(index % 3) as u8; 100 * 1024],
+            )
+            .expect("file");
+        }
+        let run = || {
+            find_duplicates(&root.display().to_string(), false)
+                .expect("scan")
+                .items
+                .iter()
+                .map(|group| group.file_paths.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(), run(), "threads must not change the order of results");
+    }
+
+    #[test]
+    fn a_cancelled_scan_or_plan_returns_the_cancel_error() {
+        use crate::progress::{Operations, CANCELLED};
+        let directory = tempdir().expect("temp directory");
+        fs::write(directory.path().join("a.bin"), b"x").expect("a");
+        fs::write(directory.path().join("b.bin"), b"x").expect("b");
+        let root = directory.path().display().to_string();
+
+        let operations = Operations::default();
+        let ctl = operations.begin(None).expect("begin");
+        operations.cancel();
+        assert_eq!(
+            find_duplicates_ctl(&root, false, &ctl).unwrap_err(),
+            CANCELLED
+        );
+        assert_eq!(
+            find_large_files_ctl(&root, false, 0, &ctl).unwrap_err(),
+            CANCELLED
+        );
+        assert_eq!(
+            find_empty_folders_ctl(&root, false, &ctl).unwrap_err(),
+            CANCELLED
+        );
+        assert_eq!(
+            create_plan_ctl(request(directory.path()), &ctl).unwrap_err(),
+            CANCELLED
+        );
+    }
+
+    #[test]
+    fn cancelling_during_a_move_stops_after_the_current_file() {
+        use crate::progress::Operations;
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let names = ["a.txt", "b.txt", "c.txt", "d.txt"];
+        for name in names {
+            fs::write(root.join(name), b"x").expect("source");
+        }
+        let destinations: Vec<PathBuf> = names.iter().map(|n| root.join("Docs").join(n)).collect();
+        let sources: Vec<PathBuf> = names.iter().map(|n| root.join(n)).collect();
+        let pairs: Vec<(&Path, &Path)> = sources
+            .iter()
+            .zip(&destinations)
+            .map(|(s, d)| (s.as_path(), d.as_path()))
+            .collect();
+        let plan = plan_with(root, &pairs);
+
+        let operations = Operations::default();
+        let ctl = operations.begin(None).expect("begin");
+        // The user presses Cancel while the second file is being settled.
+        let done = execute_plan_ctl(plan, &ctl, |index, _| {
+            if index == 1 {
+                operations.cancel();
+            }
+            Ok(())
+        })
+        .expect("execute");
+        let statuses: Vec<&str> = done.actions.iter().map(|a| a.status.as_str()).collect();
+        assert_eq!(statuses, ["executed", "executed", "skipped", "skipped"]);
+        assert!(destinations[1].is_file() && sources[2].is_file() && sources[3].is_file());
+        assert!(done.actions[3].reason.contains("cancel"));
+        // What did move is still undoable.
+        let undone = undo_plan(done).expect("undo");
+        assert!(sources.iter().all(|source| source.is_file()));
+        assert!(!root.join("Docs").exists());
+        assert_eq!(undone.actions[0].status, "undone");
+    }
+
+    #[test]
+    fn scans_and_moves_report_progress() {
+        use crate::progress::{Operations, Progress};
+        use std::sync::{Arc, Mutex};
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        for name in ["a.bin", "b.bin"] {
+            fs::write(root.join(name), vec![5_u8; 200 * 1024]).expect("file");
+        }
+        let events: Arc<Mutex<Vec<Progress>>> = Arc::default();
+        let sink = events.clone();
+        let operations = Operations::default();
+        let ctl = operations
+            .begin(Some(Box::new(move |progress| {
+                sink.lock().unwrap().push(progress)
+            })))
+            .expect("begin");
+        let found = find_duplicates_ctl(&root.display().to_string(), false, &ctl).expect("scan");
+        assert_eq!(found.items.len(), 1);
+        let seen = events.lock().unwrap().clone();
+        let phases: Vec<&str> = seen.iter().map(|event| event.phase).collect();
+        assert!(
+            phases.contains(&"scan") || phases.contains(&"quick"),
+            "{phases:?}"
+        );
+        let last_hash = seen
+            .iter()
+            .rev()
+            .find(|event| event.phase == "hash")
+            .expect("a hash event");
+        assert_eq!(
+            last_hash.done, last_hash.total,
+            "the final update reports completion"
+        );
+        assert_eq!(
+            last_hash.total,
+            2 * 200 * 1024,
+            "bytes to hash = the two candidate files"
+        );
+    }
+
+    fn category_of(file: &str, basis: &str, language: &str) -> String {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join(file);
+        fs::write(&path, b"x").expect("file");
+        let mut req = request(directory.path());
+        req.basis = basis.into();
+        req.language = language.into();
+        let plan = create_plan(req).expect("plan");
+        plan.actions[0].category.clone()
+    }
+
+    #[test]
+    fn only_images_can_be_screenshots() {
+        assert_eq!(
+            category_of("Screenshot 2026-10-10.png", "type", "ko"),
+            "이미지/스크린샷"
+        );
+        assert_eq!(category_of("캡처1.jpg", "type", "ko"), "이미지/스크린샷");
+        assert_eq!(category_of("capture-tool.exe", "type", "ko"), "설치파일");
+        assert_eq!(category_of("screen capture.mp4", "type", "ko"), "동영상");
+        assert_eq!(category_of("capture.zip", "type", "en"), "Archives");
+        assert_eq!(category_of("holiday.png", "type", "ko"), "이미지");
+    }
+
+    #[test]
+    fn csv_is_data_and_more_extensions_are_known() {
+        assert_eq!(category_of("sales.csv", "type", "ko"), "데이터");
+        assert_eq!(category_of("sales.csv", "type", "en"), "Data");
+        assert_eq!(category_of("sheet.xlsx", "type", "ko"), "문서/Excel");
+        assert_eq!(category_of("sheet.ods", "type", "ko"), "문서/Excel");
+        assert_eq!(category_of("letter.odt", "type", "ko"), "문서/Word");
+        assert_eq!(category_of("server.log", "type", "ko"), "문서/텍스트");
+        assert_eq!(category_of("logo.psd", "type", "ko"), "이미지");
+        assert_eq!(category_of("clip.mpg", "type", "ko"), "동영상");
+        assert_eq!(category_of("song.opus", "type", "ko"), "오디오");
+        assert_eq!(category_of("data.tgz", "type", "ko"), "압축파일");
+        assert_eq!(category_of("tool.apk", "type", "ko"), "설치파일");
+        assert_eq!(category_of("run.ps1", "type", "ko"), "개발");
+        assert_eq!(category_of("mystery.xyz", "type", "ko"), "기타");
+    }
+
+    #[test]
+    fn filename_basis_groups_by_first_letter() {
+        assert_eq!(category_of("가방.txt", "name", "ko"), "이름/ㄱ");
+        assert_eq!(category_of("까치.txt", "name", "ko"), "이름/ㄱ"); // ㄲ folds into ㄱ
+        assert_eq!(category_of("뿌리.txt", "name", "ko"), "이름/ㅂ");
+        assert_eq!(category_of("한글.txt", "name", "ko"), "이름/ㅎ");
+        assert_eq!(category_of("ㅋㅋ.txt", "name", "ko"), "이름/ㅋ");
+        assert_eq!(category_of("apple.png", "name", "ko"), "이름/A");
+        assert_eq!(category_of("Zebra.png", "name", "en"), "Name/Z");
+        assert_eq!(category_of("7zip.exe", "name", "ko"), "이름/0-9");
+        assert_eq!(category_of("[초안] 나나.pdf", "name", "ko"), "이름/ㅊ"); // skips the bracket itself
+        assert_eq!(category_of("[draft] 나나.pdf", "name", "ko"), "이름/D"); // the first letter counts
+        assert_eq!(category_of("  _내 파일.pdf", "name", "ko"), "이름/ㄴ");
+        assert_eq!(category_of("!!!.txt", "name", "ko"), "이름/#");
+        assert_eq!(category_of("éclair.txt", "name", "ko"), "이름/#");
+    }
+
+    #[test]
+    fn last_accessed_dates_come_with_a_warning() {
+        let directory = tempdir().expect("temp directory");
+        fs::write(directory.path().join("a.txt"), b"x").expect("file");
+        let mut req = request(directory.path());
+        req.basis = "date".into();
+        req.date_basis = "accessed".into();
+        let plan = create_plan(req).expect("plan");
+        assert!(plan.warnings.iter().any(|warning| warning.contains("접근")));
+
+        let mut modified = request(directory.path());
+        modified.basis = "date".into();
+        assert!(!create_plan(modified)
+            .expect("plan")
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("접근")));
     }
 }

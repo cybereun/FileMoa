@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { basename, formatBytes, providerStatus, requestCount, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
+import { basename, cloudOnlyNotice, formatBytes, isCancelledError, progressPercent, providerStatus, requestCount, runTitle, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
 
 describe('FileMoa UI utilities', () => {
   it('formats byte counts for the large-file view', () => {
@@ -35,5 +35,35 @@ describe('FileMoa UI utilities', () => {
     expect(shouldUseStartupPath(String.raw`C:\Work\Files`)).toBe(true);
     expect(shouldUseStartupPath('   ')).toBe(false);
     expect(shouldUseStartupPath(null)).toBe(false);
+  });
+
+  it('treats the backend cancel message as a cancel, not a failure', () => {
+    expect(isCancelledError('작업이 취소되었습니다. / The operation was cancelled.')).toBe(true);
+    expect(isCancelledError(new Error('The operation was cancelled.'))).toBe(true);
+    expect(isCancelledError('다른 작업이 진행 중입니다.')).toBe(false);
+    expect(isCancelledError('disk full')).toBe(false);
+  });
+
+  it('only mentions cloud-only files when some were skipped', () => {
+    expect(cloudOnlyNotice(0, 'ko')).toBe('');
+    expect(cloudOnlyNotice(3, 'ko')).toContain('3개');
+    expect(cloudOnlyNotice(3, 'en')).toBe('3 cloud-only file(s) were skipped so they are not downloaded.');
+  });
+
+  it('describes a history card in both languages', () => {
+    expect(runTitle({ status: 'completed', executedCount: 14, undoneCount: 0 }, 'ko')).toBe('14개 이동');
+    expect(runTitle({ status: 'completed', executedCount: 3, undoneCount: 11 }, 'ko')).toBe('3개 이동 · 11개 되돌림');
+    expect(runTitle({ status: 'completed', executedCount: 0, undoneCount: 14 }, 'ko')).toBe('14개 모두 되돌림');
+    expect(runTitle({ status: 'completed', executedCount: 0, undoneCount: 14 }, 'en')).toBe('14 moved, all undone');
+    expect(runTitle({ status: 'interrupted', executedCount: 1, undoneCount: 0 }, 'en')).toBe('1 moved · interrupted');
+    expect(runTitle({ status: 'interrupted', executedCount: 1, undoneCount: 0 }, 'ko')).toBe('1개 이동 · 중단됨');
+  });
+
+  it('computes progress only when the total is known', () => {
+    expect(progressPercent(0, 0)).toBeNull();
+    expect(progressPercent(5, 0)).toBeNull();
+    expect(progressPercent(50, 200)).toBe(25);
+    expect(progressPercent(300, 200)).toBe(100);
+    expect(progressPercent(0, 10)).toBe(0);
   });
 });

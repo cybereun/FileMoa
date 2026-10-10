@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import packageJson from '../package.json';
 import {
@@ -25,7 +25,7 @@ import {
   X,
 } from 'lucide-react';
 import './styles.css';
-import { basename, formatBytes, providerStatus, requestCount, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
+import { basename, cloudOnlyNotice as cloudOnlyMessage, formatBytes, isCancelledError, progressPercent, providerStatus, requestCount, runTitle as runTitleText, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
 
 type Category = { name: string; extensions: string[]; enabled: boolean };
 type KeywordRule = { keyword: string; category: string; caseSensitive?: boolean };
@@ -50,7 +50,23 @@ type Plan = {
   language?: string;
   mode?: string;
   rootPaths?: string[];
+  runId?: string;
+  planId?: string;
 };
+type RunSummary = {
+  runId: string;
+  status: string;
+  rootPath: string;
+  createdAt: string;
+  updatedAt: string;
+  executedCount: number;
+  undoneCount: number;
+  failedCount: number;
+  errorCount: number;
+  exclusionCount: number;
+};
+type ScanResult<T> = { items: T[]; cloudOnlySkipped: number };
+type ProgressInfo = { phase: 'scan' | 'quick' | 'hash' | 'move'; done: number; total: number; current: string };
 type Duplicate = {
   hash: string;
   sizeBytes: number;
@@ -84,6 +100,8 @@ type AiResult = {
   requestCount: number;
   suggestions: AiSuggestion[];
   proposedCategories: string[];
+  failedCount?: number;
+  failedMessage?: string | null;
 };
 type Tab = 'organize' | 'manage' | 'safety';
 type Panel = 'plan' | 'categories' | 'duplicates' | 'history' | 'large' | 'empty' | 'ai';
@@ -109,7 +127,7 @@ const labels = {
     installLater: '나중에 설치', close: '닫기', latest: '최신 버전을 사용하고 있습니다.', updateAvailable: '새 업데이트가 준비되었습니다.',
     updateLoading: '업데이트 정보를 확인하는 중…', updateInstalling: '업데이트를 다운로드하고 설치하는 중…', updateErrorTitle: '업데이트 확인 실패', updateErrorFallback: '업데이트 정보를 가져오지 못했습니다.', retry: '다시 시도',
     runAi: 'AI 분류 실행', reviewRequired: '검토 필요', newCategory: '새 카테고리 제안', requestCount: '요청 수', applySuggestions: '선택한 제안을 계획에 반영',
-    basis: '분류 기준', byType: '파일 형식', byDate: '날짜 (년-월)', byDateDay: '날짜 (년-월-일)', byYear: '연도', bySize: '파일 크기', byName: '파일명 규칙', dateBasis: '날짜 종류', byCreated: '생성 날짜', byModified: '수정 날짜', byAccessed: '마지막 사용', quickFolders: '빠른 폴더', desktop: '바탕화면', downloads: '다운로드', documents: '문서', pictures: '사진', videos: '동영상', music: '음악', includeHidden: '숨김 파일 포함', multiRoot: '여러 폴더', mode: '정리 모드', safeMode: '안전', normalMode: '일반', strongMode: '강력', exceptions: '예외 목록', exceptionHint: '폴더 경로 또는 확장자를 입력하면 정리에서 제외합니다.', addException: '예외 추가',
+    basis: '분류 기준', byType: '파일 형식', byDate: '날짜 (년-월)', byDateDay: '날짜 (년-월-일)', byYear: '연도', bySize: '파일 크기', byName: '파일명 (가나다·ABC)', dateBasis: '날짜 종류', byCreated: '생성 날짜', byModified: '수정 날짜', byAccessed: '마지막 사용', quickFolders: '빠른 폴더', desktop: '바탕화면', downloads: '다운로드', documents: '문서', pictures: '사진', videos: '동영상', music: '음악', includeHidden: '숨김 파일 포함', multiRoot: '여러 폴더', mode: '정리 모드', safeMode: '안전', normalMode: '일반', strongMode: '강력', exceptions: '예외 목록', exceptionHint: '폴더 경로 또는 확장자를 입력하면 정리에서 제외합니다.', addException: '예외 추가',
     errors: '오류', warnings: '주의', status: '상태', collision: '이름 충돌', select: '선택', recycle: '휴지통으로 보내기', emptyHint: '삭제하지 않고 후보만 표시합니다.', largeHint: '크기순으로 표시합니다. 삭제하지 않습니다.', largeThreshold: '최소 크기(MB)',
     undoPreview: '되돌리기 미리보기', undoConfirm: '선택한 정리를 되돌리기', cancel: '취소', moved: '이동됨', skipped: '건너뜀', failed: '실패', undone: '되돌림',
   },
@@ -129,23 +147,40 @@ const labels = {
     installLater: 'Install later', close: 'Close', latest: 'You already have the latest version.', updateAvailable: 'A new update is available.',
     updateLoading: 'Checking for updates…', updateInstalling: 'Downloading and installing the update…', updateErrorTitle: 'Update check failed', updateErrorFallback: 'The update information could not be retrieved.', retry: 'Retry',
     runAi: 'Run AI classification', reviewRequired: 'Review required', newCategory: 'New category suggestion', requestCount: 'Requests', applySuggestions: 'Apply selected suggestions to plan',
-    basis: 'Classification basis', byType: 'File type', byDate: 'Date (YYYY-MM)', byDateDay: 'Date (YYYY-MM-DD)', byYear: 'Year', bySize: 'File size', byName: 'Filename rules', dateBasis: 'Date field', byCreated: 'Created', byModified: 'Modified', byAccessed: 'Last accessed', quickFolders: 'Quick folders', desktop: 'Desktop', downloads: 'Downloads', documents: 'Documents', pictures: 'Pictures', videos: 'Videos', music: 'Music', includeHidden: 'Include hidden files', multiRoot: 'Multiple folders', mode: 'Organization mode', safeMode: 'Safe', normalMode: 'Normal', strongMode: 'Strong', exceptions: 'Exclusions', exceptionHint: 'Paths or extensions entered here are excluded from organization.', addException: 'Add exclusion',
+    basis: 'Classification basis', byType: 'File type', byDate: 'Date (YYYY-MM)', byDateDay: 'Date (YYYY-MM-DD)', byYear: 'Year', bySize: 'File size', byName: 'Filename (A–Z, ㄱ–ㅎ)', dateBasis: 'Date field', byCreated: 'Created', byModified: 'Modified', byAccessed: 'Last accessed', quickFolders: 'Quick folders', desktop: 'Desktop', downloads: 'Downloads', documents: 'Documents', pictures: 'Pictures', videos: 'Videos', music: 'Music', includeHidden: 'Include hidden files', multiRoot: 'Multiple folders', mode: 'Organization mode', safeMode: 'Safe', normalMode: 'Normal', strongMode: 'Strong', exceptions: 'Exclusions', exceptionHint: 'Paths or extensions entered here are excluded from organization.', addException: 'Add exclusion',
     errors: 'Errors', warnings: 'Warnings', status: 'Status', collision: 'Collision', select: 'Select', recycle: 'Move to Recycle Bin', emptyHint: 'Candidates are shown only; nothing is deleted.', largeHint: 'Sorted by size; nothing is deleted.', largeThreshold: 'Minimum size (MB)', undoPreview: 'Undo preview', undoConfirm: 'Undo selected run', cancel: 'Cancel', moved: 'Moved', skipped: 'Skipped', failed: 'Failed', undone: 'Undone',
   },
 } as const;
 
 function readLocal<T>(key: string, fallback: T): T {
   try {
-    const value = localStorage.getItem(key);
+    const value = readLocalText(key);
     return value ? (JSON.parse(value) as T) : fallback;
   } catch {
     return fallback;
   }
 }
 
+function readLocalText(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/** Preferences are conveniences: a full or blocked store must never break the app. */
+function writeLocal(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // ignore: the setting simply will not persist
+  }
+}
+
 export default function App() {
   const [lang, setLang] = useState<'ko' | 'en'>(() => {
-    const stored = localStorage.getItem('filemoa-language');
+    const stored = readLocalText('filemoa-language');
     if (stored === 'ko' || stored === 'en') return stored;
     return navigator.language.toLowerCase().startsWith('ko') ? 'ko' : 'en';
   });
@@ -156,14 +191,7 @@ export default function App() {
   const [multiRoot, setMultiRoot] = useState(false);
   const [sub, setSub] = useState(false);
   const [plan, setPlan] = useState<Plan | null>(null);
-  const [runs, setRuns] = useState<Plan[]>(() => {
-    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    return readLocal<Plan[]>('filemoa-runs', []).filter((run) => {
-      if (!run.createdAt) return true;
-      const timestamp = Date.parse(run.createdAt);
-      return Number.isNaN(timestamp) || timestamp >= cutoff;
-    });
-  });
+  const [runs, setRuns] = useState<RunSummary[]>([]);
   const [cats, setCats] = useState<Category[]>(() => readLocal('filemoa-categories', []));
   const [rules, setRules] = useState<KeywordRule[]>(() => readLocal('filemoa-keyword-rules', []));
   const [excludedPaths, setExcludedPaths] = useState<string[]>(() => readLocal('filemoa-excluded-paths', []));
@@ -175,21 +203,24 @@ export default function App() {
   const [cleanupSelection, setCleanupSelection] = useState<string[]>([]);
   const [scanPanel, setScanPanel] = useState<ScanPanel>(null);
   const scanRequestRef = useRef(0);
+  const startupRan = useRef(false);
   const [knownFolders, setKnownFolders] = useState<KnownFolder[]>([]);
-  const [basis, setBasis] = useState(() => localStorage.getItem('filemoa-basis') || 'type');
-  const [mode, setMode] = useState(() => localStorage.getItem('filemoa-mode') || 'safe');
-  const [dateBasis, setDateBasis] = useState(() => localStorage.getItem('filemoa-date-basis') || 'modified');
-  const [largeThresholdMb, setLargeThresholdMb] = useState(() => localStorage.getItem('filemoa-large-threshold-mb') || '100');
+  const [basis, setBasis] = useState(() => readLocalText('filemoa-basis') || 'type');
+  const [mode, setMode] = useState(() => readLocalText('filemoa-mode') || 'safe');
+  const [dateBasis, setDateBasis] = useState(() => readLocalText('filemoa-date-basis') || 'modified');
+  const [largeThresholdMb, setLargeThresholdMb] = useState(() => readLocalText('filemoa-large-threshold-mb') || '100');
   const [includeHidden, setIncludeHidden] = useState(false);
   const [undoPreview, setUndoPreview] = useState<Plan | null>(null);
   const [aiProviders, setAiProviders] = useState<AiProvider[]>([]);
   const [selectedAi, setSelectedAi] = useState('ollama');
   const [aiKeyDraft, setAiKeyDraft] = useState('');
   const [aiModelDraft, setAiModelDraft] = useState('');
+  const [aiModelOptions, setAiModelOptions] = useState<string[]>([]);
   const [aiMessage, setAiMessage] = useState('');
   const [aiResult, setAiResult] = useState<AiResult | null>(null);
   const [approvedAiIds, setApprovedAiIds] = useState<number[]>([]);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<ProgressInfo | null>(null);
   const [notice, setNotice] = useState('');
   const [settings, setSettings] = useState(false);
   const [name, setName] = useState('');
@@ -205,6 +236,8 @@ export default function App() {
   const t = labels[lang];
 
   const total = useMemo(() => plan?.actions.length ?? 0, [plan]);
+  // Only a plan that still has moves waiting can be run; an executed one was consumed by the backend.
+  const pendingCount = useMemo(() => plan?.actions.filter((action) => action.status === 'proposed').length ?? 0, [plan]);
   const selectedProvider = aiProviders.find((provider) => provider.id === selectedAi);
 
   async function choose() {
@@ -239,6 +272,30 @@ export default function App() {
     return key in t ? t[key] : id;
   }
 
+  /** Run a long backend command and show its progress; the backend allows one at a time. */
+  async function withProgress<T>(command: string, args: Record<string, unknown>): Promise<T> {
+    const channel = new Channel<ProgressInfo>();
+    channel.onmessage = setProgress;
+    try {
+      return await invoke<T>(command, { ...args, onProgress: channel });
+    } finally {
+      setProgress(null);
+    }
+  }
+
+  function failure(error: unknown) {
+    const cancelled = isCancelledError(error);
+    setNotice(cancelled ? (lang === 'ko' ? '작업을 취소했습니다.' : 'The operation was cancelled.') : String(error));
+  }
+
+  async function cancelOperation() {
+    try {
+      await invoke('cancel_operation');
+    } catch (error) {
+      setNotice(String(error));
+    }
+  }
+
   async function makePlan() {
     if (!path) return;
     setBusy(true);
@@ -257,57 +314,76 @@ export default function App() {
           keywordRules: rules,
         };
       const next = paths.length > 1
-        ? await invoke<Plan>('plan_multiple_organizations', { requests: paths.map((rootPath) => ({ ...request, rootPath })) })
-        : await invoke<Plan>('plan_organization', { request: { ...request, rootPath: paths[0] ?? path } });
+        ? await withProgress<Plan>('plan_multiple_organizations', { requests: paths.map((rootPath) => ({ ...request, rootPath })) })
+        : await withProgress<Plan>('plan_organization', { request: { ...request, rootPath: paths[0] ?? path } });
       setPlan(next);
       setPanel('plan');
       setNotice('');
     } catch (error) {
-      setNotice(String(error));
+      failure(error);
     } finally {
       setBusy(false);
     }
   }
+
+  async function refreshRuns() {
+    try {
+      setRuns(await invoke<RunSummary[]>('list_runs'));
+    } catch (error) {
+      setNotice(String(error));
+    }
+  }
+
+  const runTitle = (run: RunSummary) => runTitleText(run, lang);
 
   async function execute() {
     if (!plan) return;
-    const confirmation = total >= 100
+    const confirmation = pendingCount >= 100
       ? (lang === 'ko'
-        ? `대량 작업입니다. ${total}개 파일을 이동합니다. 미리보기와 경고를 확인했나요? 계속할까요?`
-        : `This is a bulk operation: ${total} files will move. Have you reviewed the preview and warnings? Continue?`)
-      : (lang === 'ko' ? `${total}개 파일을 이동할까요?` : `Move ${total} files?`);
+        ? `대량 작업입니다. ${pendingCount}개 파일을 이동합니다. 미리보기와 경고를 확인했나요? 계속할까요?`
+        : `This is a bulk operation: ${pendingCount} files will move. Have you reviewed the preview and warnings? Continue?`)
+      : (lang === 'ko' ? `${pendingCount}개 파일을 이동할까요?` : `Move ${pendingCount} files?`);
     if (!confirm(confirmation)) return;
     setBusy(true);
     try {
-      const done = await invoke<Plan>('execute_organization', { plan });
+      const done = await withProgress<Plan>('execute_organization', { planId: plan.planId });
       setPlan(done);
-      setRuns((previous) => [done, ...previous].slice(0, 100));
+      void refreshRuns();
       setPanel('history');
-      setNotice(lang === 'ko' ? '정리가 완료되었습니다.' : 'Organization completed.');
+      const cancelledCount = done.actions.filter((action) => action.status === 'skipped' && /취소|cancel/i.test(action.reason)).length;
+      const movedCount = done.actions.filter((action) => action.status === 'executed').length;
+      setNotice(cancelledCount
+        ? (lang === 'ko' ? `취소했습니다. ${movedCount}개는 이동했고 ${cancelledCount}개는 그대로 남았습니다. 정리 기록에서 되돌릴 수 있습니다.` : `Cancelled. ${movedCount} moved, ${cancelledCount} left in place. You can undo the moved ones from the history.`)
+        : (lang === 'ko' ? '정리가 완료되었습니다.' : 'Organization completed.'));
     } catch (error) {
-      setNotice(String(error));
+      failure(error);
     } finally {
       setBusy(false);
     }
   }
 
-  function openUndoPreview(run = runs[0]) {
-    if (run) setUndoPreview(run);
+  async function openUndoPreview(runId = runs.find((run) => run.executedCount > 0)?.runId) {
+    if (!runId) return;
+    try {
+      setUndoPreview(await invoke<Plan>('load_run', { runId }));
+    } catch (error) {
+      setNotice(String(error));
+    }
   }
 
-  async function undo(run = undoPreview ?? runs[0]) {
+  async function undo(run = undoPreview) {
     if (!run) return;
     const restoreCount = run.actions.filter((action) => action.status === 'executed').length;
     if (!restoreCount || !confirm(lang === 'ko' ? `${restoreCount}개 파일을 원래 위치로 되돌릴까요? 기존 파일은 덮어쓰지 않습니다.` : `Restore ${restoreCount} files to their original locations? Existing files will never be overwritten.`)) return;
     setBusy(true);
     try {
-      const done = await invoke<Plan>('undo_organization', { plan: run });
-      setRuns((previous) => [done, ...previous.slice(1)]);
+      const done = await invoke<Plan>('undo_organization', { runId: run.runId });
+      void refreshRuns();
       setPlan(done);
       setUndoPreview(null);
       setNotice(lang === 'ko' ? '마지막 정리를 되돌렸습니다.' : 'Last organization was undone.');
     } catch (error) {
-      setNotice(String(error));
+      failure(error);
     } finally {
       setBusy(false);
     }
@@ -324,10 +400,14 @@ export default function App() {
     setNotice('');
     setBusy(true);
     try {
-      const results = (await Promise.all(roots.map((rootPath) => invoke<Duplicate[]>('find_duplicates', { rootPath, includeSubfolders: sub })))).flat();
-      if (requestId === scanRequestRef.current) setDuplicates(results);
+      const scans: ScanResult<Duplicate>[] = [];
+      for (const rootPath of roots) scans.push(await withProgress<ScanResult<Duplicate>>('find_duplicates', { rootPath, includeSubfolders: sub }));
+      if (requestId === scanRequestRef.current) {
+        setDuplicates(scans.flatMap((scan) => scan.items));
+        setNotice(cloudOnlyNotice(scans.reduce((sum, scan) => sum + scan.cloudOnlySkipped, 0)));
+      }
     } catch (error) {
-      if (requestId === scanRequestRef.current) setNotice(String(error));
+      if (requestId === scanRequestRef.current) failure(error);
     } finally {
       if (requestId === scanRequestRef.current) {
         setScanPanel(null);
@@ -335,6 +415,8 @@ export default function App() {
       }
     }
   }
+
+  const cloudOnlyNotice = (count: number) => cloudOnlyMessage(count, lang);
 
   async function scanLargeFiles() {
     if (!path) return;
@@ -348,10 +430,14 @@ export default function App() {
     setBusy(true);
     try {
       const threshold = Math.max(1, Number(largeThresholdMb) || 100) * 1024 * 1024;
-      const results = (await Promise.all(roots.map((rootPath) => invoke<LargeFile[]>('find_large_files', { rootPath, includeSubfolders: sub, minimumSizeBytes: threshold })))).flat();
-      if (requestId === scanRequestRef.current) setLargeFiles(results);
+      const scans: ScanResult<LargeFile>[] = [];
+      for (const rootPath of roots) scans.push(await withProgress<ScanResult<LargeFile>>('find_large_files', { rootPath, includeSubfolders: sub, minimumSizeBytes: threshold }));
+      if (requestId === scanRequestRef.current) {
+        setLargeFiles(scans.flatMap((scan) => scan.items));
+        setNotice(cloudOnlyNotice(scans.reduce((sum, scan) => sum + scan.cloudOnlySkipped, 0)));
+      }
     } catch (error) {
-      if (requestId === scanRequestRef.current) setNotice(String(error));
+      if (requestId === scanRequestRef.current) failure(error);
     } finally {
       if (requestId === scanRequestRef.current) {
         setScanPanel(null);
@@ -371,10 +457,11 @@ export default function App() {
     setNotice('');
     setBusy(true);
     try {
-      const results = (await Promise.all(roots.map((rootPath) => invoke<string[]>('find_empty_folders', { rootPath, includeSubfolders: sub })))).flat();
+      const results: string[] = [];
+      for (const rootPath of roots) results.push(...(await withProgress<string[]>('find_empty_folders', { rootPath, includeSubfolders: sub })));
       if (requestId === scanRequestRef.current) setEmptyFolders(results);
     } catch (error) {
-      if (requestId === scanRequestRef.current) setNotice(String(error));
+      if (requestId === scanRequestRef.current) failure(error);
     } finally {
       if (requestId === scanRequestRef.current) {
         setScanPanel(null);
@@ -389,14 +476,19 @@ export default function App() {
     if (!confirmed) return;
     setBusy(true);
     try {
-      const moved = await invoke<string[]>('recycle_files', { paths: pathsToRecycle });
+      const outcome = await invoke<{ recycled: string[]; skipped: { path: string; reason: string }[] }>('recycle_files', { paths: pathsToRecycle });
+      const moved = outcome.recycled;
       setDuplicateSelection((previous) => previous.filter((item) => !moved.includes(item)));
       setCleanupSelection((previous) => previous.filter((item) => !moved.includes(item)));
       setDuplicates((previous) => previous.map((group) => ({ ...group, filePaths: group.filePaths.filter((item) => !moved.includes(item)), reclaimableBytes: group.sizeBytes * Math.max(0, group.filePaths.filter((item) => !moved.includes(item)).length - 1) })).filter((group) => group.filePaths.length > 1));
       setEmptyFolders((previous) => previous.filter((item) => !moved.includes(item)));
-      setNotice(lang === 'ko' ? `${moved.length}개 항목을 휴지통으로 보냈습니다.` : `${moved.length} item(s) moved to the Recycle Bin.`);
+      const skippedCount = outcome.skipped.length;
+      const firstReason = skippedCount ? outcome.skipped[0].reason : '';
+      setNotice(lang === 'ko'
+        ? `${moved.length}개 항목을 휴지통으로 보냈습니다.${skippedCount ? ` ${skippedCount}개는 삭제하지 않았습니다: ${firstReason}` : ''}`
+        : `${moved.length} item(s) moved to the Recycle Bin.${skippedCount ? ` ${skippedCount} item(s) were not deleted: ${firstReason}` : ''}`);
     } catch (error) {
-      setNotice(String(error));
+      failure(error);
     } finally {
       setBusy(false);
     }
@@ -435,7 +527,25 @@ export default function App() {
       const result = await invoke<AiResult>('classify_files', { providerId: selectedProvider.id, files, categories });
       setAiResult(result);
       setApprovedAiIds([]);
-      setAiMessage(lang === 'ko' ? `${result.suggestions.length}개 제안을 받았습니다. 검토 후 승인하세요.` : `${result.suggestions.length} suggestions received. Review and approve them.`);
+      const failed = result.failedCount ?? 0;
+      const partial = failed
+        ? (lang === 'ko' ? ` ${failed}개 파일은 응답을 받지 못해 제외했습니다(${result.failedMessage ?? ''}). 나머지만 검토하세요.` : ` ${failed} files got no answer and were left out (${result.failedMessage ?? ''}). Review the rest.`)
+        : '';
+      setAiMessage((lang === 'ko' ? `${result.suggestions.length}개 제안을 받았습니다. 검토 후 승인하세요.` : `${result.suggestions.length} suggestions received. Review and approve them.`) + partial);
+    } catch (error) {
+      setAiMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadAiModels() {
+    if (!selectedProvider) return;
+    setBusy(true);
+    try {
+      const models = await invoke<string[]>('list_ai_models', { providerId: selectedProvider.id });
+      setAiModelOptions(models);
+      setAiMessage(lang === 'ko' ? `사용 가능한 모델 ${models.length}개를 불러왔습니다. 모델 칸에서 선택하세요.` : `${models.length} models available. Pick one in the model field.`);
     } catch (error) {
       setAiMessage(String(error));
     } finally {
@@ -448,7 +558,7 @@ export default function App() {
     const approved = aiResult.suggestions.filter((suggestion) => approvedAiIds.includes(suggestion.id));
     setBusy(true);
     try {
-      const next = await invoke<Plan>('apply_ai_suggestions', { plan, suggestions: approved });
+      const next = await invoke<Plan>('apply_ai_suggestions', { planId: plan.planId, suggestions: approved });
       const proposed = approved.filter((suggestion) => suggestion.isNewCategory);
       if (proposed.length) {
         setCats((previous) => {
@@ -598,22 +708,60 @@ export default function App() {
         }
       })
       .catch((error) => setNotice(String(error)));
+    // StrictMode runs effects twice in development; import and recovery must run once.
+    if (startupRan.current) return;
+    startupRan.current = true;
+    void (async () => {
+      let notice = '';
+      const legacy = readLocal<Plan[]>('filemoa-runs', []);
+      if (legacy.length) {
+        let failed = 0;
+        for (const run of legacy) {
+          try {
+            await invoke('import_legacy_runs', { runs: [run] });
+          } catch {
+            failed += 1;
+          }
+        }
+        try {
+          localStorage.removeItem('filemoa-runs');
+        } catch {
+          // ignore
+        }
+        if (failed) {
+          notice = lang === 'ko' ? `이전 기록 ${failed}개를 가져오지 못했습니다.` : `${failed} older history entries could not be imported.`;
+        }
+      }
+      try {
+        const recovered = await invoke<Plan[]>('recover_interrupted_runs');
+        if (recovered.length) {
+          const moved = recovered.reduce((sum, run) => sum + run.actions.filter((action) => action.status === 'executed').length, 0);
+          setPanel('history');
+          notice = lang === 'ko'
+            ? `이전 정리가 중단되었습니다. 이동된 ${moved}개 파일이 기록에 복구되었습니다. 정리 기록에서 확인하거나 되돌릴 수 있습니다.`
+            : `A previous organization was interrupted. ${moved} moved files were recovered into the history, where you can review or undo them.`;
+        }
+      } catch (error) {
+        notice = String(error);
+      }
+      await refreshRuns();
+      if (notice) setNotice(notice);
+    })();
     // Startup checks are silent: they only set the update badge/notice.
     void checkForUpdate(false);
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('filemoa-language', lang);
-    localStorage.setItem('filemoa-categories', JSON.stringify(cats));
-    localStorage.setItem('filemoa-keyword-rules', JSON.stringify(rules));
-    localStorage.setItem('filemoa-excluded-paths', JSON.stringify(excludedPaths));
-    localStorage.setItem('filemoa-excluded-extensions', JSON.stringify(excludedExtensions));
-    localStorage.setItem('filemoa-basis', basis);
-    localStorage.setItem('filemoa-mode', mode);
-    localStorage.setItem('filemoa-date-basis', dateBasis);
-    localStorage.setItem('filemoa-large-threshold-mb', largeThresholdMb);
-    localStorage.setItem('filemoa-runs', JSON.stringify(runs));
-  }, [lang, cats, rules, excludedPaths, excludedExtensions, basis, mode, dateBasis, largeThresholdMb, runs]);
+    writeLocal('filemoa-language', lang);
+    writeLocal('filemoa-categories', JSON.stringify(cats));
+    writeLocal('filemoa-keyword-rules', JSON.stringify(rules));
+    writeLocal('filemoa-excluded-paths', JSON.stringify(excludedPaths));
+    writeLocal('filemoa-excluded-extensions', JSON.stringify(excludedExtensions));
+    writeLocal('filemoa-basis', basis);
+    writeLocal('filemoa-mode', mode);
+    writeLocal('filemoa-date-basis', dateBasis);
+    writeLocal('filemoa-large-threshold-mb', largeThresholdMb);
+  }, [lang, cats, rules, excludedPaths, excludedExtensions, basis, mode, dateBasis, largeThresholdMb]);
 
   useEffect(() => {
     const provider = aiProviders.find((item) => item.id === selectedAi);
@@ -659,8 +807,8 @@ export default function App() {
     ? [
         { key: 'folder', icon: FolderOpen, action: choose },
         { key: 'preview', icon: Search, action: makePlan, disabled: !path },
-        { key: 'execute', icon: Play, action: execute, disabled: !plan || !total },
-        { key: 'aiClassify', icon: Bot, action: runAiClassification, disabled: !plan || !total },
+        { key: 'execute', icon: Play, action: execute, disabled: !plan || !plan.planId || !pendingCount },
+        { key: 'aiClassify', icon: Bot, action: runAiClassification, disabled: !plan || !plan.planId || !pendingCount },
       ]
     : tab === 'manage'
       ? [
@@ -671,7 +819,7 @@ export default function App() {
           { key: 'aiSettings', icon: Bot, action: () => setPanel('ai') },
         ]
       : [
-          { key: 'undo', icon: Undo2, action: () => openUndoPreview(), disabled: !runs.length },
+          { key: 'undo', icon: Undo2, action: () => void openUndoPreview(), disabled: !runs.some((run) => run.executedCount > 0) },
           { key: 'history', icon: History, action: () => setPanel('history') },
         ];
 
@@ -719,6 +867,7 @@ export default function App() {
         <code className="ribbon-path" title={path || t.empty}>{path || t.empty}</code>
       </section>
 
+      {progress && <ProgressBar progress={progress} lang={lang} onCancel={() => void cancelOperation()} />}
       {notice && <p className="notice">{notice}</p>}
 
       <section className="workspace">
@@ -763,17 +912,17 @@ export default function App() {
 
         {panel === 'history' && <>
           <h2>{t.history}</h2>
-          {runs.length ? runs.map((run, index) => <div className="card" key={`${run.rootPath}-${index}`}><b>{run.actions.filter((action) => action.status === 'executed').length} files moved</b><span>{run.rootPath}</span><span className="muted">{run.createdAt ? new Date(run.createdAt).toLocaleString() : ''} · {run.exclusions.length} exclusions · {run.errors.length} errors</span>{index === 0 && <button onClick={() => openUndoPreview(run)}>{t.undo}</button>}</div>) : <Empty text={t.nothing} />}
+          {runs.length ? runs.map((run) => <div className="card" key={run.runId}><b>{runTitle(run)}</b><span>{run.rootPath}</span><span className="muted">{run.updatedAt ? new Date(run.updatedAt).toLocaleString() : ''} · {lang === 'ko' ? `제외 ${run.exclusionCount}개 · 오류 ${run.errorCount}개` : `${run.exclusionCount} exclusions · ${run.errorCount} errors`}</span>{run.executedCount > 0 && <button onClick={() => void openUndoPreview(run.runId)}>{t.undo}</button>}</div>) : <Empty text={t.nothing} />}
         </>}
 
         {panel === 'ai' && <>
           <div className="panel-heading"><div><h2>{t.aiTitle}</h2><p>{t.aiHint}</p></div><button className="icon-button" onClick={() => void refreshAiProviders()} disabled={busy} aria-label={t.retry}><RefreshCw size={18} /></button></div>
           <div className="privacy-callout"><ShieldCheck size={19} /><span>{t.localOnly}</span></div>
           <h3>{t.selected}</h3>
-          <div className="provider-grid">{aiProviders.map((provider) => <button className={`provider-card ${selectedAi === provider.id ? 'selected' : ''}`} key={provider.id} onClick={() => { setSelectedAi(provider.id); setAiKeyDraft(''); }}><span className="provider-name"><Bot size={17} /> {provider.displayName}</span><span className="provider-state">{providerStatus(provider.id, provider.keyPresent, provider.available, lang)}</span></button>)}</div>
+          <div className="provider-grid">{aiProviders.map((provider) => <button className={`provider-card ${selectedAi === provider.id ? 'selected' : ''}`} key={provider.id} onClick={() => { setSelectedAi(provider.id); setAiKeyDraft(''); setAiModelOptions([]); }}><span className="provider-name"><Bot size={17} /> {provider.displayName}</span><span className="provider-state">{providerStatus(provider.id, provider.keyPresent, provider.available, lang)}</span></button>)}</div>
           {selectedProvider && <div className="ai-editor"><div className="ai-editor-title"><h3>{selectedProvider.displayName}</h3>{selectedProvider.id === 'ollama' && <span className={selectedProvider.available ? 'status-good' : 'status-muted'}>{selectedProvider.endpoint}</span>}</div>
             {selectedProvider.id !== 'ollama' && <label className="field-label">{t.apiKey}<input type="password" value={aiKeyDraft} onChange={(event) => setAiKeyDraft(event.target.value)} placeholder={selectedProvider.keyPresent ? '••••••••••••••••' : 'sk-…'} autoComplete="new-password" /></label>}
-            <label className="field-label">{t.model}{selectedProvider.id === 'ollama' && selectedProvider.ollamaModels.length ? <select value={aiModelDraft} onChange={(event) => setAiModelDraft(event.target.value)}>{selectedProvider.ollamaModels.map((model) => <option value={model} key={model}>{model}</option>)}</select> : <input value={aiModelDraft} onChange={(event) => setAiModelDraft(event.target.value)} placeholder={selectedProvider.model} />}<small>{t.modelHint}</small></label>
+            <label className="field-label">{t.model}{selectedProvider.id === 'ollama' && selectedProvider.ollamaModels.length ? <select value={aiModelDraft} onChange={(event) => setAiModelDraft(event.target.value)}>{selectedProvider.ollamaModels.map((model) => <option value={model} key={model}>{model}</option>)}</select> : <><input value={aiModelDraft} onChange={(event) => setAiModelDraft(event.target.value)} placeholder={selectedProvider.model} list="ai-model-options" /><datalist id="ai-model-options">{aiModelOptions.map((model) => <option value={model} key={model} />)}</datalist></>}<small>{t.modelHint}</small>{selectedProvider.id !== 'ollama' && selectedProvider.keyPresent && <button type="button" className="secondary-action" onClick={() => void loadAiModels()} disabled={busy}>{lang === 'ko' ? '사용 가능한 모델 불러오기' : 'Load available models'}</button>}</label>
             <div className="ai-actions"><button onClick={() => void saveAiProvider()} disabled={busy || (selectedProvider.id !== 'ollama' && !aiKeyDraft && !selectedProvider.keyPresent)}><CheckCircle2 size={16} /> {t.save}</button><button onClick={() => void testAiProvider()} disabled={busy || (selectedProvider.id !== 'ollama' && !selectedProvider.keyPresent && !aiKeyDraft)}><RefreshCw size={16} /> {t.test}</button>{selectedProvider.id !== 'ollama' && selectedProvider.keyPresent && <button className="danger-action" onClick={() => void removeAiKey()} disabled={busy}><Trash2 size={16} /> {t.removeKey}</button>}</div>
             {selectedProvider.id !== 'ollama' && <a className="registration-link" href={selectedProvider.registrationUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} /> {t.getKey}</a>}
             {selectedProvider.id === 'ollama' && <p className="ollama-help"><Clock3 size={15} /> {selectedProvider.ollamaModels.length ? `${t.ollamaModels}: ${selectedProvider.ollamaModels.join(', ')}` : t.ollamaMissing}</p>}
@@ -805,6 +954,29 @@ export default function App() {
 
 function Empty({ text }: { text: string }) {
   return <div className="empty"><FolderTree size={36} /><p>{text}</p></div>;
+}
+
+function ProgressBar({ progress, lang, onCancel }: { progress: ProgressInfo; lang: 'ko' | 'en'; onCancel: () => void }) {
+  const labels: Record<ProgressInfo['phase'], [string, string]> = {
+    scan: ['폴더를 읽는 중', 'Reading folders'],
+    quick: ['같은 크기의 파일을 빠르게 비교하는 중', 'Comparing same-size files'],
+    hash: ['파일 내용을 비교하는 중', 'Comparing file contents'],
+    move: ['파일을 이동하는 중', 'Moving files'],
+  };
+  const label = labels[progress.phase][lang === 'ko' ? 0 : 1];
+  const known = progress.total > 0;
+  const percent = progressPercent(progress.done, progress.total) ?? 0;
+  const count = progress.phase === 'hash'
+    ? `${formatBytes(progress.done)} / ${formatBytes(progress.total)}`
+    : known ? `${progress.done} / ${progress.total}` : `${progress.done}`;
+  return (
+    <div className="progress-card" role="status" aria-live="polite">
+      <div className="progress-head"><b>{label}</b><span>{known ? `${percent}% · ` : ''}{count}</span></div>
+      {known ? <progress value={progress.done} max={progress.total} /> : <progress />}
+      <small className="progress-current">{progress.current}</small>
+      <button className="secondary-action" onClick={onCancel}>{lang === 'ko' ? '취소' : 'Cancel'}</button>
+    </div>
+  );
 }
 
 function Loading({ text }: { text: string }) {

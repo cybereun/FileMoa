@@ -1,11 +1,18 @@
 mod ai;
+mod journal;
+mod plan_store;
 mod planner;
+mod progress;
 mod recycle;
+mod scan_store;
 
-use planner::{create_plan, OrganizationPlan, PlanRequest};
+use plan_store::PlanStore;
+use planner::{OrganizationPlan, PlanRequest};
+use progress::{Ctl, Operations, Progress};
+use scan_store::ScanStore;
 use serde::Serialize;
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager};
+use tauri::{ipc::Channel, AppHandle, Manager};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,65 +83,251 @@ fn startup_path() -> Result<Option<String>, String> {
     Ok(Some(path.display().to_string()))
 }
 
+/// Start the one allowed long operation; progress goes to `channel`.
+fn begin(ops: &Operations, channel: Option<Channel<Progress>>) -> Result<Ctl, String> {
+    ops.begin(channel.map(|channel| {
+        Box::new(move |progress: Progress| {
+            let _ = channel.send(progress);
+        }) as Box<dyn Fn(Progress) + Send + Sync>
+    }))
+}
+
+/// Run blocking work off the UI thread: a plain `fn` command would run on it
+/// and freeze the window for as long as a big folder takes.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("작업 스레드 오류 / worker thread failed: {error}"))?
+}
+
+/// Ask the running operation to stop at its next checkpoint.
 #[tauri::command]
-fn plan_organization(request: PlanRequest) -> Result<OrganizationPlan, String> {
-    create_plan(request)
+fn cancel_operation(ops: tauri::State<'_, Operations>) {
+    ops.cancel();
 }
 
 #[tauri::command]
-fn plan_multiple_organizations(requests: Vec<PlanRequest>) -> Result<OrganizationPlan, String> {
-    planner::create_multi_plan(requests)
+async fn plan_organization(
+    store: tauri::State<'_, PlanStore>,
+    ops: tauri::State<'_, Operations>,
+    request: PlanRequest,
+    on_progress: Channel<Progress>,
+) -> Result<OrganizationPlan, String> {
+    let ctl = begin(&ops, Some(on_progress))?;
+    let mut plan = blocking(move || planner::create_plan_ctl(request, &ctl)).await?;
+    store.insert(&mut plan);
+    Ok(plan)
 }
 
 #[tauri::command]
-fn execute_organization(plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
-    planner::execute_plan(plan)
+async fn plan_multiple_organizations(
+    store: tauri::State<'_, PlanStore>,
+    ops: tauri::State<'_, Operations>,
+    requests: Vec<PlanRequest>,
+    on_progress: Channel<Progress>,
+) -> Result<OrganizationPlan, String> {
+    let ctl = begin(&ops, Some(on_progress))?;
+    let mut plan = blocking(move || planner::create_multi_plan_ctl(requests, &ctl)).await?;
+    store.insert(&mut plan);
+    Ok(plan)
+}
+
+fn runs_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join("runs"))
+        .map_err(|e| {
+            format!("앱 데이터 경로를 확인할 수 없습니다 / app data path unavailable: {e}")
+        })
+}
+
+/// Runs the plan the backend stored under `plan_id`. The renderer never
+/// supplies the paths that get moved.
+#[tauri::command]
+async fn execute_organization(
+    app: AppHandle,
+    store: tauri::State<'_, PlanStore>,
+    ops: tauri::State<'_, Operations>,
+    plan_id: String,
+    on_progress: Channel<Progress>,
+) -> Result<OrganizationPlan, String> {
+    let dir = runs_dir(&app)?;
+    let ctl = begin(&ops, Some(on_progress))?;
+    // A plan can be claimed once: a double click cannot run it twice.
+    let mut plan = store.claim(&plan_id)?;
+    planner::mark_changed_since_preview(&mut plan);
+    let backup = plan.clone();
+    match blocking(move || journal::execute_with_journal_ctl(&dir, plan, &ctl)).await {
+        Ok(done) => Ok(done),
+        Err(error) => {
+            // Nothing was moved when the run could not even start; keep the plan.
+            store.restore(backup);
+            Err(error)
+        }
+    }
+}
+
+/// Runs that were still in progress when the app last stopped, with every
+/// journaled move applied so they can be reviewed or undone.
+#[tauri::command]
+fn recover_interrupted_runs(app: AppHandle) -> Result<Vec<OrganizationPlan>, String> {
+    journal::recover(&runs_dir(&app)?)
+}
+
+/// Undo reads the run from the backend's own record; the renderer only names it.
+#[tauri::command]
+async fn undo_organization(
+    app: AppHandle,
+    ops: tauri::State<'_, Operations>,
+    run_id: String,
+) -> Result<OrganizationPlan, String> {
+    let dir = runs_dir(&app)?;
+    let ctl = begin(&ops, None)?;
+    blocking(move || {
+        let _running = ctl;
+        let plan = journal::load_run(&dir, &run_id)?;
+        let mut undone = planner::undo_plan(plan)?;
+        // Files are already restored; a record that cannot be saved must not turn
+        // that success into an error, so surface it as a warning instead.
+        if let Err(error) = journal::save_finished(&dir, &undone) {
+            undone.warnings.push(error);
+        }
+        Ok(undone)
+    })
+    .await
 }
 
 #[tauri::command]
-fn undo_organization(plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
-    planner::undo_plan(plan)
+fn list_runs(app: AppHandle) -> Result<Vec<journal::RunSummary>, String> {
+    journal::list_runs(&runs_dir(&app)?, 30)
 }
 
 #[tauri::command]
-fn find_duplicates(
+fn load_run(app: AppHandle, run_id: String) -> Result<OrganizationPlan, String> {
+    journal::load_run(&runs_dir(&app)?, &run_id)
+}
+
+#[tauri::command]
+fn delete_run(app: AppHandle, run_id: String) -> Result<(), String> {
+    journal::delete_run(&runs_dir(&app)?, &run_id)
+}
+
+#[tauri::command]
+fn import_legacy_runs(app: AppHandle, runs: Vec<OrganizationPlan>) -> Result<usize, String> {
+    journal::import_legacy(&runs_dir(&app)?, runs)
+}
+
+#[tauri::command]
+async fn find_duplicates(
+    scans: tauri::State<'_, ScanStore>,
+    ops: tauri::State<'_, Operations>,
     root_path: String,
     include_subfolders: bool,
-) -> Result<Vec<planner::DuplicateGroup>, String> {
-    planner::find_duplicates(&root_path, include_subfolders)
+    on_progress: Channel<Progress>,
+) -> Result<planner::ScanResult<planner::DuplicateGroup>, String> {
+    let ctl = begin(&ops, Some(on_progress))?;
+    let result =
+        blocking(move || planner::find_duplicates_ctl(&root_path, include_subfolders, &ctl))
+            .await?;
+    scans.register_duplicates(&result.items);
+    Ok(result)
 }
 
 #[tauri::command]
-fn find_large_files(
+async fn find_large_files(
+    scans: tauri::State<'_, ScanStore>,
+    ops: tauri::State<'_, Operations>,
     root_path: String,
     include_subfolders: bool,
     minimum_size_bytes: u64,
-) -> Result<Vec<planner::LargeFile>, String> {
-    planner::find_large_files(&root_path, include_subfolders, minimum_size_bytes)
+    on_progress: Channel<Progress>,
+) -> Result<planner::ScanResult<planner::LargeFile>, String> {
+    let ctl = begin(&ops, Some(on_progress))?;
+    let result = blocking(move || {
+        planner::find_large_files_ctl(&root_path, include_subfolders, minimum_size_bytes, &ctl)
+    })
+    .await?;
+    scans.register_large(&result.items);
+    Ok(result)
 }
 
 #[tauri::command]
-fn find_empty_folders(root_path: String, include_subfolders: bool) -> Result<Vec<String>, String> {
-    planner::find_empty_folders(&root_path, include_subfolders)
+async fn find_empty_folders(
+    scans: tauri::State<'_, ScanStore>,
+    ops: tauri::State<'_, Operations>,
+    root_path: String,
+    include_subfolders: bool,
+    on_progress: Channel<Progress>,
+) -> Result<Vec<String>, String> {
+    let ctl = begin(&ops, Some(on_progress))?;
+    let folders =
+        blocking(move || planner::find_empty_folders_ctl(&root_path, include_subfolders, &ctl))
+            .await?;
+    scans.register_empty(&folders);
+    Ok(folders)
 }
 
+/// Only items a scan listed, unchanged since, and never the last copy of a
+/// duplicate group, may go to the Recycle Bin.
 #[tauri::command]
-fn recycle_files(paths: Vec<String>) -> Result<Vec<String>, String> {
-    recycle::recycle_files(paths)
+fn recycle_files(
+    window: tauri::WebviewWindow,
+    scans: tauri::State<'_, ScanStore>,
+    paths: Vec<String>,
+) -> Result<recycle::RecycleOutcome, String> {
+    if paths.is_empty() {
+        return Err("휴지통으로 보낼 파일을 하나 이상 선택하세요.".into());
+    }
+    let (accepted, mut skipped) = scans.authorize(&paths);
+    if accepted.is_empty() {
+        return Ok(recycle::RecycleOutcome {
+            recycled: Vec::new(),
+            skipped,
+        });
+    }
+    // The shell's "permanent delete" warning needs an owner window to appear on top.
+    #[cfg(windows)]
+    let owner = window
+        .hwnd()
+        .map(|handle| handle.0 as windows_sys::Win32::Foundation::HWND)
+        .unwrap_or(std::ptr::null_mut());
+    #[cfg(not(windows))]
+    let owner = {
+        let _ = &window;
+        std::ptr::null_mut()
+    };
+    let outcome = recycle::recycle_files(accepted, owner)?;
+    scans.forget(&outcome.recycled);
+    skipped.extend(outcome.skipped);
+    Ok(recycle::RecycleOutcome {
+        recycled: outcome.recycled,
+        skipped,
+    })
 }
 
 pub fn run() {
     tauri::Builder::default()
+        .manage(PlanStore::default())
+        .manage(ScanStore::default())
+        .manage(Operations::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             known_folders,
+            cancel_operation,
             startup_path,
             plan_organization,
             plan_multiple_organizations,
             execute_organization,
+            recover_interrupted_runs,
+            list_runs,
+            load_run,
+            delete_run,
+            import_legacy_runs,
             undo_organization,
             find_duplicates,
             find_large_files,
@@ -146,6 +339,7 @@ pub fn run() {
             ai::remove_ai_provider_key,
             ai::test_ai_provider_connection,
             ai::classify_files,
+            ai::list_ai_models,
             ai::apply_ai_suggestions
         ])
         .run(tauri::generate_context!())
