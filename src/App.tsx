@@ -870,12 +870,17 @@ export default function App() {
             {ribbon.map(({ key, icon: Icon, action, disabled }) => <button key={key} onClick={() => void action()} disabled={busy || disabled}><Icon size={22} /><span>{t[key as keyof typeof t]}</span></button>)}
           </div>
           {tab === 'organize' && <div className="ribbon-controls">
-            <ToggleChip icon={Layers} checked={sub} onChange={setSub} label={t.sub} />
+            <div className="ribbon-group" role="group" aria-label={lang === 'ko' ? '분류 방식' : 'How to sort'}>
             <label className="ribbon-option"><ListFilter size={16} aria-hidden="true" /><span>{t.basis}</span><select value={basis} onChange={(event) => setBasis(event.target.value)}><option value="type">{t.byType}</option><option value="date">{t.byDate}</option><option value="date_day">{t.byDateDay}</option><option value="year">{t.byYear}</option><option value="size">{t.bySize}</option><option value="name">{t.byName}</option></select></label>
             {(basis === 'date' || basis === 'date_day' || basis === 'year') && <label className="ribbon-option"><CalendarDays size={16} aria-hidden="true" /><span>{t.dateBasis}</span><select value={dateBasis} onChange={(event) => setDateBasis(event.target.value)}><option value="created">{t.byCreated}</option><option value="modified">{t.byModified}</option><option value="accessed">{t.byAccessed}</option></select></label>}
             <label className="ribbon-option">{mode === 'strong' ? <ShieldAlert size={16} aria-hidden="true" /> : mode === 'normal' ? <Shield size={16} aria-hidden="true" /> : <ShieldCheck size={16} aria-hidden="true" />}<span>{t.mode}</span><select value={mode} onChange={(event) => setMode(event.target.value)}><option value="safe">{t.safeMode}</option><option value="normal">{t.normalMode}</option><option value="strong">{t.strongMode}</option></select></label>
+            </div>
+            <span className="ribbon-divider" aria-hidden="true" />
+            <div className="ribbon-group" role="group" aria-label={lang === 'ko' ? '정리 범위' : 'What to include'}>
+            <ToggleChip icon={Layers} checked={sub} onChange={setSub} label={t.sub} />
             <ToggleChip icon={includeHidden ? Eye : EyeOff} checked={includeHidden} onChange={setIncludeHidden} label={t.includeHidden} />
             <ToggleChip icon={Folders} checked={multiRoot} onChange={(next) => { setMultiRoot(next); if (!next && paths.length > 1) { setPaths(paths.slice(0, 1)); setPath(paths[0]); } }} label={t.multiRoot} />
+            </div>
           </div>}
         </div>
         {tab === 'organize' && knownFolders.length > 0 && <div className="quick-folders" aria-label={t.quickFolders}>
