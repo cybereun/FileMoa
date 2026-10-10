@@ -311,7 +311,7 @@ fn builtin(ext: &str, language: &str, file_name: &str) -> (&'static str, &'stati
     }
 }
 
-fn path_key(path: &Path) -> String {
+pub(crate) fn path_key(path: &Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
         .trim_end_matches('\\')
@@ -1056,6 +1056,15 @@ fn path_blocker(action: &PlannedAction, roots: &[PathBuf]) -> Option<&'static st
         return Some("보호된 경로라 거부됨 / rejected: protected path");
     }
     None
+}
+
+/// Whole seconds since the epoch, the resolution plans and scans compare on.
+pub(crate) fn modified_secs(metadata: &fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| value.as_secs())
 }
 
 /// Called with a plan the backend itself stored: skip files that changed

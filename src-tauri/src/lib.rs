@@ -3,9 +3,11 @@ mod journal;
 mod plan_store;
 mod planner;
 mod recycle;
+mod scan_store;
 
 use plan_store::PlanStore;
 use planner::{create_plan, OrganizationPlan, PlanRequest};
+use scan_store::ScanStore;
 use serde::Serialize;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -173,31 +175,56 @@ fn import_legacy_runs(app: AppHandle, runs: Vec<OrganizationPlan>) -> Result<usi
 
 #[tauri::command]
 fn find_duplicates(
+    scans: tauri::State<'_, ScanStore>,
     root_path: String,
     include_subfolders: bool,
 ) -> Result<planner::ScanResult<planner::DuplicateGroup>, String> {
-    planner::find_duplicates(&root_path, include_subfolders)
+    let result = planner::find_duplicates(&root_path, include_subfolders)?;
+    scans.register_duplicates(&result.items);
+    Ok(result)
 }
 
 #[tauri::command]
 fn find_large_files(
+    scans: tauri::State<'_, ScanStore>,
     root_path: String,
     include_subfolders: bool,
     minimum_size_bytes: u64,
 ) -> Result<planner::ScanResult<planner::LargeFile>, String> {
-    planner::find_large_files(&root_path, include_subfolders, minimum_size_bytes)
+    let result = planner::find_large_files(&root_path, include_subfolders, minimum_size_bytes)?;
+    scans.register_large(&result.items);
+    Ok(result)
 }
 
 #[tauri::command]
-fn find_empty_folders(root_path: String, include_subfolders: bool) -> Result<Vec<String>, String> {
-    planner::find_empty_folders(&root_path, include_subfolders)
+fn find_empty_folders(
+    scans: tauri::State<'_, ScanStore>,
+    root_path: String,
+    include_subfolders: bool,
+) -> Result<Vec<String>, String> {
+    let folders = planner::find_empty_folders(&root_path, include_subfolders)?;
+    scans.register_empty(&folders);
+    Ok(folders)
 }
 
+/// Only items a scan listed, unchanged since, and never the last copy of a
+/// duplicate group, may go to the Recycle Bin.
 #[tauri::command]
 fn recycle_files(
     window: tauri::WebviewWindow,
+    scans: tauri::State<'_, ScanStore>,
     paths: Vec<String>,
 ) -> Result<recycle::RecycleOutcome, String> {
+    if paths.is_empty() {
+        return Err("휴지통으로 보낼 파일을 하나 이상 선택하세요.".into());
+    }
+    let (accepted, mut skipped) = scans.authorize(&paths);
+    if accepted.is_empty() {
+        return Ok(recycle::RecycleOutcome {
+            recycled: Vec::new(),
+            skipped,
+        });
+    }
     // The shell's "permanent delete" warning needs an owner window to appear on top.
     #[cfg(windows)]
     let owner = window
@@ -209,12 +236,19 @@ fn recycle_files(
         let _ = &window;
         std::ptr::null_mut()
     };
-    recycle::recycle_files(paths, owner)
+    let outcome = recycle::recycle_files(accepted, owner)?;
+    scans.forget(&outcome.recycled);
+    skipped.extend(outcome.skipped);
+    Ok(recycle::RecycleOutcome {
+        recycled: outcome.recycled,
+        skipped,
+    })
 }
 
 pub fn run() {
     tauri::Builder::default()
         .manage(PlanStore::default())
+        .manage(ScanStore::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
