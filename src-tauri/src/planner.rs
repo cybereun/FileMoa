@@ -299,7 +299,44 @@ fn path_is_under(path: &Path, parent: &Path) -> bool {
     path == parent || path.starts_with(&(parent + "\\"))
 }
 
-fn protected(path: &Path) -> bool {
+/// Resolve 8.3 short names (`PROGRA~1`), junctions and symlinks so a protected
+/// folder cannot be reached under another spelling. Falls back to the input
+/// when the path does not exist.
+fn resolved(path: &Path) -> PathBuf {
+    let Ok(real) = fs::canonicalize(path) else {
+        return path.to_path_buf();
+    };
+    let text = real.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        real
+    }
+}
+
+/// Per-user and system folders from the environment, in resolved form.
+fn protected_environment_dirs() -> &'static [PathBuf] {
+    static DIRS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    DIRS.get_or_init(|| {
+        [
+            "APPDATA",
+            "LOCALAPPDATA",
+            "SystemRoot",
+            "windir",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramData",
+        ]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(|value| resolved(Path::new(&value)))
+        .collect()
+    })
+}
+
+fn protected_spelling(path: &Path) -> bool {
     let key = path_key(path);
     let component_match = |name: &str| {
         path.components().any(|component| {
@@ -316,21 +353,80 @@ fn protected(path: &Path) -> bool {
         || key.contains(":\\program files (x86)\\")
         || key.ends_with(":\\programdata")
         || key.contains(":\\programdata\\");
-    let app_data = std::env::var_os("APPDATA")
-        .into_iter()
-        .chain(std::env::var_os("LOCALAPPDATA"))
-        .map(|value| path_is_under(path, Path::new(&value)))
-        .any(|value| value);
+    let environment = protected_environment_dirs()
+        .iter()
+        .any(|dir| path_is_under(path, dir));
     system_root
         || program_root
-        || app_data
+        || environment
         || component_match(".git")
         || component_match("node_modules")
 }
 
-/// Shared safety check for commands that operate on paths selected in the UI.
+/// Cheap check used inside scan loops over many files.
+fn protected(path: &Path) -> bool {
+    protected_spelling(path)
+}
+
+/// Shared safety check for commands that operate on paths chosen in the UI.
+/// Also checks the resolved path, so short names and junctions do not bypass it.
 pub fn is_protected_path(path: &Path) -> bool {
-    protected(path)
+    protected_spelling(path) || protected_spelling(&resolved(path))
+}
+
+/// Top-level folders that hold system state on every drive.
+const PROTECTED_DRIVE_FOLDERS: &[&str] = &["$recycle.bin", "system volume information"];
+
+/// Top-level folders that are only system state on the Windows drive; on a
+/// data drive a folder called `Recovery` is usually the user's own.
+const PROTECTED_SYSTEM_DRIVE_FOLDERS: &[&str] = &[
+    "recovery",
+    "windows.old",
+    "boot",
+    "msocache",
+    "$windows.~bt",
+    "$windows.~ws",
+];
+
+fn on_system_drive(path: &Path) -> bool {
+    let drive = path_key(path).chars().take(2).collect::<String>();
+    std::env::var("SystemDrive")
+        .map(|system| system.to_ascii_lowercase() == drive)
+        .unwrap_or(false)
+}
+
+/// Why `root` may not be organised, if it may not. Checked on the resolved
+/// path: a drive root, the user profile or one of its parents, a system
+/// folder, or a protected location.
+pub(crate) fn root_rejection(root: &Path) -> Option<&'static str> {
+    let real = resolved(root);
+    for path in [root, real.as_path()] {
+        if path.parent().is_none() {
+            return Some("드라이브 루트는 정리할 수 없습니다. 하위 폴더를 선택하세요. / A drive root cannot be organised; pick a folder inside it.");
+        }
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            let profile = resolved(Path::new(&profile));
+            if path_is_under(&profile, path) {
+                return Some("사용자 폴더 전체(또는 그 상위 폴더)는 정리할 수 없습니다. 문서·다운로드 같은 하위 폴더를 선택하세요. / The whole user profile (or a parent of it) cannot be organised; pick a folder inside it.");
+            }
+        }
+        let first = path
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(name) => Some(name.to_string_lossy().to_lowercase()),
+                _ => None,
+            })
+            .next();
+        if first.as_deref().is_some_and(|name| {
+            PROTECTED_DRIVE_FOLDERS.contains(&name)
+                || (PROTECTED_SYSTEM_DRIVE_FOLDERS.contains(&name) && on_system_drive(path))
+        }) {
+            return Some("시스템 폴더는 정리할 수 없습니다. / System folders cannot be organised.");
+        }
+    }
+    (protected_spelling(root) || protected_spelling(&real)).then_some(
+        "보호된 시스템 또는 앱 데이터 경로는 정리할 수 없습니다. / Protected system or app-data path.",
+    )
 }
 
 fn project(path: &Path) -> bool {
@@ -670,8 +766,11 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
     if !root.is_dir() {
         return Err("선택한 폴더를 찾을 수 없습니다. / The selected folder does not exist.".into());
     }
-    if protected(&root) || project(&root) {
-        return Err("보호된 시스템 또는 개발 프로젝트 경로는 정리할 수 없습니다. / Protected system or development project path.".into());
+    if let Some(reason) = root_rejection(&root) {
+        return Err(reason.into());
+    }
+    if project(&root) {
+        return Err("개발 프로젝트 폴더는 정리할 수 없습니다. / Development project folders cannot be organised.".into());
     }
     let category_roots = planned_category_roots(&root, &req);
     let mut actions = Vec::new();
@@ -1601,5 +1700,64 @@ mod tests {
         let done = execute_plan_with(plan, |_, _| Ok(())).expect("execute");
         assert_eq!(done.actions[0].status, "skipped");
         assert!(!root.join("Docs").exists());
+    }
+
+    #[test]
+    fn drive_roots_profile_and_system_folders_cannot_be_organised() {
+        assert!(root_rejection(Path::new("C:\\")).is_some());
+        assert!(root_rejection(Path::new("D:\\")).is_some());
+        assert!(root_rejection(Path::new(r"C:\$Recycle.Bin")).is_some());
+        assert!(root_rejection(Path::new(r"E:\System Volume Information")).is_some());
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            let profile = PathBuf::from(profile);
+            assert!(
+                root_rejection(&profile).is_some(),
+                "the profile root itself"
+            );
+            if let Some(parent) = profile.parent() {
+                assert!(root_rejection(parent).is_some(), "a parent of the profile");
+            }
+            // A folder inside the profile is fine (it is not under AppData).
+            assert!(root_rejection(&profile.join("Downloads")).is_none());
+        }
+    }
+
+    #[test]
+    fn data_drive_folders_named_like_system_folders_are_allowed() {
+        // `Recovery` is only special on the Windows drive.
+        let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        let other = if system.to_ascii_lowercase().starts_with('d') {
+            "E:"
+        } else {
+            "D:"
+        };
+        assert!(root_rejection(Path::new(&format!(r"{other}\Recovery\mine"))).is_none());
+        assert!(root_rejection(Path::new(&format!(r"{system}\Recovery"))).is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn short_8_3_names_do_not_bypass_protection() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+        // "Program Files" has a distinct 8.3 alias (PROGRA~1) when the volume keeps them.
+        let long = PathBuf::from(std::env::var_os("ProgramFiles").expect("ProgramFiles"));
+        let wide: Vec<u16> = long.as_os_str().encode_wide().chain([0]).collect();
+        let mut buffer = vec![0_u16; 1024];
+        let length =
+            unsafe { GetShortPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32) };
+        assert!(length > 0, "GetShortPathNameW failed");
+        let short = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+        if path_key(&short) == path_key(&long) {
+            eprintln!("8.3 names are disabled on this volume; bypass cannot be exercised");
+            return;
+        }
+        // The spelling alone no longer matches, so only resolution can catch it.
+        assert!(!path_is_under(&short, &long));
+        assert!(
+            is_protected_path(&short),
+            "{short:?} must resolve to {long:?}"
+        );
+        assert!(root_rejection(&short).is_some());
     }
 }
