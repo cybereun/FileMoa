@@ -51,6 +51,7 @@ type Plan = {
   mode?: string;
   rootPaths?: string[];
   runId?: string;
+  planId?: string;
 };
 type RunSummary = {
   runId: string;
@@ -230,6 +231,8 @@ export default function App() {
   const t = labels[lang];
 
   const total = useMemo(() => plan?.actions.length ?? 0, [plan]);
+  // Only a plan that still has moves waiting can be run; an executed one was consumed by the backend.
+  const pendingCount = useMemo(() => plan?.actions.filter((action) => action.status === 'proposed').length ?? 0, [plan]);
   const selectedProvider = aiProviders.find((provider) => provider.id === selectedAi);
 
   async function choose() {
@@ -314,15 +317,15 @@ export default function App() {
 
   async function execute() {
     if (!plan) return;
-    const confirmation = total >= 100
+    const confirmation = pendingCount >= 100
       ? (lang === 'ko'
-        ? `대량 작업입니다. ${total}개 파일을 이동합니다. 미리보기와 경고를 확인했나요? 계속할까요?`
-        : `This is a bulk operation: ${total} files will move. Have you reviewed the preview and warnings? Continue?`)
-      : (lang === 'ko' ? `${total}개 파일을 이동할까요?` : `Move ${total} files?`);
+        ? `대량 작업입니다. ${pendingCount}개 파일을 이동합니다. 미리보기와 경고를 확인했나요? 계속할까요?`
+        : `This is a bulk operation: ${pendingCount} files will move. Have you reviewed the preview and warnings? Continue?`)
+      : (lang === 'ko' ? `${pendingCount}개 파일을 이동할까요?` : `Move ${pendingCount} files?`);
     if (!confirm(confirmation)) return;
     setBusy(true);
     try {
-      const done = await invoke<Plan>('execute_organization', { plan });
+      const done = await invoke<Plan>('execute_organization', { planId: plan.planId });
       setPlan(done);
       void refreshRuns();
       setPanel('history');
@@ -349,7 +352,7 @@ export default function App() {
     if (!restoreCount || !confirm(lang === 'ko' ? `${restoreCount}개 파일을 원래 위치로 되돌릴까요? 기존 파일은 덮어쓰지 않습니다.` : `Restore ${restoreCount} files to their original locations? Existing files will never be overwritten.`)) return;
     setBusy(true);
     try {
-      const done = await invoke<Plan>('undo_organization', { plan: run });
+      const done = await invoke<Plan>('undo_organization', { runId: run.runId });
       void refreshRuns();
       setPlan(done);
       setUndoPreview(null);
@@ -514,7 +517,7 @@ export default function App() {
     const approved = aiResult.suggestions.filter((suggestion) => approvedAiIds.includes(suggestion.id));
     setBusy(true);
     try {
-      const next = await invoke<Plan>('apply_ai_suggestions', { plan, suggestions: approved });
+      const next = await invoke<Plan>('apply_ai_suggestions', { planId: plan.planId, suggestions: approved });
       const proposed = approved.filter((suggestion) => suggestion.isNewCategory);
       if (proposed.length) {
         setCats((previous) => {
@@ -763,8 +766,8 @@ export default function App() {
     ? [
         { key: 'folder', icon: FolderOpen, action: choose },
         { key: 'preview', icon: Search, action: makePlan, disabled: !path },
-        { key: 'execute', icon: Play, action: execute, disabled: !plan || !total },
-        { key: 'aiClassify', icon: Bot, action: runAiClassification, disabled: !plan || !total },
+        { key: 'execute', icon: Play, action: execute, disabled: !plan || !plan.planId || !pendingCount },
+        { key: 'aiClassify', icon: Bot, action: runAiClassification, disabled: !plan || !plan.planId || !pendingCount },
       ]
     : tab === 'manage'
       ? [

@@ -194,3 +194,6 @@
 - **B2 완료**: 선택한 루트와 직접 지정한 삭제 경로는 `canonicalize`로 실제 경로를 풀어 검사(8.3 짧은 이름·정션·심볼릭 링크 우회 차단). 드라이브 루트, 사용자 프로필(및 그 상위), `\.Bin`, `System Volume Information` 거부. `Recovery`/`boot` 등은 Windows 드라이브에서만. 보호 환경 폴더는 `APPDATA`/`LOCALAPPDATA`/`SystemRoot`/`ProgramFiles`/`ProgramData` 기준. 수만 개 파일을 도는 스캔 루프는 기존의 가벼운 검사를 유지.
 - 알려진 한계: 폴더 안의 정션을 WalkDir이 따라 들어갈 수 있음(이 경우 정션 대상이 보호 경로여도 파일 단위 검사는 원래 철자만 봄). B1에서 실행 직전 재검증이 이를 보완.
 - **B3 완료**: 프로젝트 감지를 점수 방식으로 변경. `.git`/`.hg`/`.svn`은 단독으로 프로젝트, `package.json` 등 매니페스트는 2개 이상이거나 `src`·`lib`·`node_modules` 같은 소스 폴더와 함께일 때만 프로젝트. `.sln`/`.csproj`/`Gemfile`/`pubspec.yaml`/`Makefile`/`deno.json` 추가. 다운로드 폴더의 낱개 `package.json`은 더 이상 정리를 막지 않음. 스캔은 폴더별 결과를 캐시.
+- **B1 완료**: 계획은 백엔드 메모리(`PlanStore`, 최대 8개)에 보관하고 화면에는 `planId`만 반환. `execute_organization(planId)`, `apply_ai_suggestions(planId, suggestions)`, `undo_organization(runId)`는 경로를 받지 않음. 계획은 한 번만 실행 가능(claim), 시작 실패 시 복원. 실행 직전 항목별 검증: 절대경로, `..` 금지, 원본·대상이 같은 선택 폴더 안, 보호 경로 아님, 미리보기 이후 크기·수정시각 변경 시 건너뜀. Undo도 기록의 경로가 폴더 밖이면 `undo_failed`. 진행 중 실행 보호: 저널을 `FILE_SHARE_READ`로 열어 두어 다른 앱 인스턴스가 시작 복구에서 살아 있는 실행을 건드리지 못함.
+- 남은 한계: `recycle_files`(휴지통)는 아직 화면이 준 경로를 받는다(보호 경로·드라이브 종류는 검증). 검사 결과를 서버가 기억해 그 안의 경로만 허용하는 방식을 B1 후속으로 검토.
+- 실제 앱 E2E(CDP) 28개 통과: 위조 계획·미지의 ID·재실행·미리보기 후 수정 파일·위조된 기록으로 폴더 밖 Undo·AI 카테고리 `..\..` 탈출·루트 거부(드라이브·프로필·AppData·휴지통)·낱개 package.json.

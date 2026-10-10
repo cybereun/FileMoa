@@ -114,9 +114,16 @@ impl RunJournal {
         let record_path = record_path(dir, &plan.run_id);
         write_record(&record_path, "running", plan)?;
         let journal_path = record_path.with_extension("journal");
-        let file = OpenOptions::new()
-            .create_new(true)
-            .append(true)
+        let mut options = OpenOptions::new();
+        options.create_new(true).append(true);
+        // While this run is alive nobody else may open the journal for writing,
+        // which is how a second app instance tells "running" from "crashed".
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(1); // FILE_SHARE_READ
+        }
+        let file = options
             .open(&journal_path)
             .map_err(|e| format!("실행 저널을 열 수 없습니다 / cannot open run journal: {e}"))?;
         Ok(Self {
@@ -390,6 +397,11 @@ pub fn recover(dir: &Path) -> Result<Vec<OrganizationPlan>, String> {
             continue;
         }
         let journal_path = path.with_extension("journal");
+        // A journal that is still held open belongs to a live run (for
+        // example in another window); only a crashed run is recovered.
+        if journal_path.exists() && OpenOptions::new().write(true).open(&journal_path).is_err() {
+            continue;
+        }
         apply_journal(&mut record.plan, &journal_path);
         for action in &mut record.plan.actions {
             if action.status == "proposed" {
@@ -409,7 +421,16 @@ pub fn recover(dir: &Path) -> Result<Vec<OrganizationPlan>, String> {
 mod tests {
     use super::*;
     use crate::planner::undo_plan;
-    use tempfile::tempdir;
+
+    /// The system temp folder is under %LOCALAPPDATA%, a protected location the
+    /// planner refuses to move files in. Keep test folders inside the build tree.
+    fn tempdir() -> std::io::Result<tempfile::TempDir> {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp");
+        fs::create_dir_all(&base)?;
+        tempfile::Builder::new().tempdir_in(base)
+    }
 
     fn action(source: &Path, destination: &Path) -> PlannedAction {
         PlannedAction {
@@ -438,6 +459,7 @@ mod tests {
             mode: "safe".into(),
             root_paths: vec![root.display().to_string()],
             run_id: String::new(),
+            plan_id: String::new(),
         }
     }
 
@@ -636,5 +658,25 @@ mod tests {
         undo_plan(recovered.into_iter().next().unwrap()).expect("undo");
         assert!(source.is_file());
         assert!(!folder.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_run_that_is_still_alive_is_not_recovered() {
+        let root = tempdir().expect("root");
+        let runs = tempdir().expect("runs");
+        let source = root.path().join("a.txt");
+        fs::write(&source, b"a").expect("source");
+        let destination = root.path().join("Text").join("a.txt");
+        let mut plan = plan_for(root.path(), vec![action(&source, &destination)]);
+        let journal = RunJournal::begin(runs.path(), &mut plan).expect("begin");
+
+        // Another app instance starting up must leave this run alone.
+        assert!(recover(runs.path()).expect("recover").is_empty());
+        assert_eq!(read_record(runs.path(), &plan.run_id).status, "running");
+
+        // Once the owner is gone (a crash), the same call recovers it.
+        drop(journal);
+        assert_eq!(recover(runs.path()).expect("recover").len(), 1);
     }
 }

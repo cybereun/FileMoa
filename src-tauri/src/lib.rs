@@ -1,8 +1,10 @@
 mod ai;
 mod journal;
+mod plan_store;
 mod planner;
 mod recycle;
 
+use plan_store::PlanStore;
 use planner::{create_plan, OrganizationPlan, PlanRequest};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -78,13 +80,23 @@ fn startup_path() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-fn plan_organization(request: PlanRequest) -> Result<OrganizationPlan, String> {
-    create_plan(request)
+fn plan_organization(
+    store: tauri::State<'_, PlanStore>,
+    request: PlanRequest,
+) -> Result<OrganizationPlan, String> {
+    let mut plan = create_plan(request)?;
+    store.insert(&mut plan);
+    Ok(plan)
 }
 
 #[tauri::command]
-fn plan_multiple_organizations(requests: Vec<PlanRequest>) -> Result<OrganizationPlan, String> {
-    planner::create_multi_plan(requests)
+fn plan_multiple_organizations(
+    store: tauri::State<'_, PlanStore>,
+    requests: Vec<PlanRequest>,
+) -> Result<OrganizationPlan, String> {
+    let mut plan = planner::create_multi_plan(requests)?;
+    store.insert(&mut plan);
+    Ok(plan)
 }
 
 fn runs_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -96,12 +108,26 @@ fn runs_dir(app: &AppHandle) -> Result<PathBuf, String> {
         })
 }
 
+/// Runs the plan the backend stored under `plan_id`. The renderer never
+/// supplies the paths that get moved.
 #[tauri::command]
 fn execute_organization(
     app: AppHandle,
-    plan: OrganizationPlan,
+    store: tauri::State<'_, PlanStore>,
+    plan_id: String,
 ) -> Result<OrganizationPlan, String> {
-    journal::execute_with_journal(&runs_dir(&app)?, plan)
+    let dir = runs_dir(&app)?;
+    // A plan can be claimed once: a double click cannot run it twice.
+    let mut plan = store.claim(&plan_id)?;
+    planner::mark_changed_since_preview(&mut plan);
+    match journal::execute_with_journal(&dir, plan.clone()) {
+        Ok(done) => Ok(done),
+        Err(error) => {
+            // Nothing was moved when the run could not even start; keep the plan.
+            store.restore(plan);
+            Err(error)
+        }
+    }
 }
 
 /// Runs that were still in progress when the app last stopped, with every
@@ -111,12 +137,15 @@ fn recover_interrupted_runs(app: AppHandle) -> Result<Vec<OrganizationPlan>, Str
     journal::recover(&runs_dir(&app)?)
 }
 
+/// Undo reads the run from the backend's own record; the renderer only names it.
 #[tauri::command]
-fn undo_organization(app: AppHandle, plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
+fn undo_organization(app: AppHandle, run_id: String) -> Result<OrganizationPlan, String> {
+    let dir = runs_dir(&app)?;
+    let plan = journal::load_run(&dir, &run_id)?;
     let mut undone = planner::undo_plan(plan)?;
     // Files are already restored; a record that cannot be saved must not turn
     // that success into an error, so surface it as a warning instead.
-    if let Err(error) = journal::save_finished(&runs_dir(&app)?, &undone) {
+    if let Err(error) = journal::save_finished(&dir, &undone) {
         undone.warnings.push(error);
     }
     Ok(undone)
@@ -185,6 +214,7 @@ fn recycle_files(
 
 pub fn run() {
     tauri::Builder::default()
+        .manage(PlanStore::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())

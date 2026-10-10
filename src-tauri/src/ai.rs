@@ -84,8 +84,20 @@ pub struct AiClassificationResult {
     pub proposed_categories: Vec<String>,
 }
 
+/// Applies approved suggestions to the plan the backend holds; the renderer
+/// names the plan but never supplies paths.
 #[tauri::command]
 pub fn apply_ai_suggestions(
+    store: tauri::State<'_, crate::plan_store::PlanStore>,
+    plan_id: String,
+    suggestions: Vec<AiSuggestion>,
+) -> Result<crate::planner::OrganizationPlan, String> {
+    let updated = apply_suggestions(store.get(&plan_id)?, suggestions)?;
+    store.update(updated.clone())?;
+    Ok(updated)
+}
+
+pub fn apply_suggestions(
     mut plan: crate::planner::OrganizationPlan,
     suggestions: Vec<AiSuggestion>,
 ) -> Result<crate::planner::OrganizationPlan, String> {

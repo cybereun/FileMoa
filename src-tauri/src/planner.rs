@@ -150,6 +150,9 @@ pub struct OrganizationPlan {
     /// Identifies the persisted run record/journal; empty until execution starts.
     #[serde(default)]
     pub run_id: String,
+    /// Handle to the plan kept by the backend; the UI sends only this to execute.
+    #[serde(default)]
+    pub plan_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -958,6 +961,7 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
         mode: req.mode,
         root_paths: vec![root.display().to_string()],
         run_id: String::new(),
+        plan_id: String::new(),
     })
 }
 
@@ -1007,7 +1011,79 @@ pub fn create_multi_plan(requests: Vec<PlanRequest>) -> Result<OrganizationPlan,
         mode,
         root_paths,
         run_id: String::new(),
+        plan_id: String::new(),
     })
+}
+
+fn plan_roots(plan: &OrganizationPlan) -> Vec<PathBuf> {
+    if plan.root_paths.is_empty() {
+        plan.root_path.split('\n').map(PathBuf::from).collect()
+    } else {
+        plan.root_paths.iter().map(PathBuf::from).collect()
+    }
+}
+
+fn has_parent_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+}
+
+/// Why this move may not run, judged only from the plan's own folders: both
+/// ends must be absolute, free of `..`, inside the same chosen folder, and
+/// outside protected locations.
+fn path_blocker(action: &PlannedAction, roots: &[PathBuf]) -> Option<&'static str> {
+    let (source, destination) = (
+        Path::new(&action.source_path),
+        Path::new(&action.destination_path),
+    );
+    if !source.is_absolute() || !destination.is_absolute() {
+        return Some("전체 경로가 아니어서 거부됨 / rejected: not an absolute path");
+    }
+    if has_parent_component(source) || has_parent_component(destination) {
+        return Some("경로에 '..'가 있어 거부됨 / rejected: path contains '..'");
+    }
+    let Some(root) = roots.iter().find(|root| path_is_under(source, root)) else {
+        return Some(
+            "원본이 선택한 폴더 밖이라 거부됨 / rejected: source is outside the chosen folder",
+        );
+    };
+    if !path_is_under(destination, root) {
+        return Some(
+            "대상이 선택한 폴더 밖이라 거부됨 / rejected: destination is outside the chosen folder",
+        );
+    }
+    if protected_spelling(source) || protected_spelling(destination) {
+        return Some("보호된 경로라 거부됨 / rejected: protected path");
+    }
+    None
+}
+
+/// Called with a plan the backend itself stored: skip files that changed
+/// since the preview, so the user approves exactly what is moved.
+pub fn mark_changed_since_preview(plan: &mut OrganizationPlan) {
+    for action in plan
+        .actions
+        .iter_mut()
+        .filter(|action| action.status == "proposed")
+    {
+        let Ok(metadata) = fs::metadata(&action.source_path) else {
+            continue; // a missing source is reported by the move itself
+        };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|value| value.as_secs());
+        let size_changed = metadata.len() != action.size_bytes;
+        let time_changed =
+            action.modified_unix_secs.is_some() && modified != action.modified_unix_secs;
+        if size_changed || time_changed {
+            action.status = "skipped".into();
+            action.reason =
+                "미리보기 이후 파일이 변경되어 건너뜀 / skipped: the file changed after the preview"
+                    .into();
+        }
+    }
 }
 
 /// Move `from` to `to` and fail with `AlreadyExists` instead of replacing a
@@ -1072,11 +1148,21 @@ pub fn execute_plan_with<F>(
 where
     F: FnMut(usize, &PlannedAction) -> Result<(), String>,
 {
+    let roots = plan_roots(&plan);
     for index in 0..plan.actions.len() {
         if plan.actions[index].status != "proposed" {
             continue;
         }
-        run_action(&mut plan, index);
+        if let Some(reason) = path_blocker(&plan.actions[index], &roots) {
+            plan.actions[index].status = "skipped".into();
+            plan.actions[index].reason = reason.into();
+            plan.errors.push(format!(
+                "{}: {}",
+                plan.actions[index].source_path, plan.actions[index].reason
+            ));
+        } else {
+            run_action(&mut plan, index);
+        }
         if let Err(error) = on_action(index, &plan.actions[index]) {
             plan.errors.push(error);
             for action in &mut plan.actions[index + 1..] {
@@ -1161,9 +1247,17 @@ fn remove_empty_dirs(dirs: &[PathBuf]) {
 }
 
 pub fn undo_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String> {
+    let roots = plan_roots(&plan);
     for index in 0..plan.actions.len() {
         let action = &mut plan.actions[index];
         if action.status != "executed" {
+            continue;
+        }
+        if let Some(reason) = path_blocker(action, &roots) {
+            action.status = "undo_failed".into();
+            action.reason = reason.into();
+            plan.errors
+                .push(format!("{}: {}", action.destination_path, action.reason));
             continue;
         }
         let from = PathBuf::from(&action.destination_path);
@@ -1549,6 +1643,7 @@ mod tests {
             mode: "safe".into(),
             root_paths: vec![directory.path().display().to_string()],
             run_id: String::new(),
+            plan_id: String::new(),
         };
         let result = undo_plan(plan).expect("undo");
         assert_eq!(result.actions[0].status, "undo_conflict");
@@ -1616,6 +1711,7 @@ mod tests {
             mode: "safe".into(),
             root_paths: vec![directory.path().display().to_string()],
             run_id: String::new(),
+            plan_id: String::new(),
         };
         // The file shows up after the preview was built, before execution.
         fs::create_dir_all(destination.parent().unwrap()).expect("category");
@@ -1705,6 +1801,7 @@ mod tests {
             mode: "safe".into(),
             root_paths: vec![root.display().to_string()],
             run_id: String::new(),
+            plan_id: String::new(),
         }
     }
 
@@ -1892,5 +1989,73 @@ mod tests {
             "files inside the real project stay put: {moved:?}"
         );
         assert!(plan.exclusions.iter().any(|note| note.contains("app")));
+    }
+
+    #[test]
+    fn execution_refuses_paths_outside_the_chosen_folder() {
+        let directory = tempdir().expect("temp directory");
+        let outside = tempdir().expect("outside");
+        let root = directory.path();
+        let inside_file = root.join("a.txt");
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&inside_file, b"a").expect("inside");
+        fs::write(&outside_file, b"secret").expect("outside");
+        let escape = root.join("..").join("escaped.txt");
+        let plan = plan_with(
+            root,
+            &[
+                (&outside_file, &root.join("Docs").join("secret.txt")), // source outside the folder
+                (&inside_file, &outside.path().join("a.txt")),          // destination outside
+                (&inside_file, &escape),                                // `..` traversal
+            ],
+        );
+        let done = execute_plan_with(plan, |_, _| Ok(())).expect("execute");
+        assert!(
+            done.actions.iter().all(|action| action.status == "skipped"),
+            "{:?}",
+            done.actions.iter().map(|a| &a.reason).collect::<Vec<_>>()
+        );
+        assert!(outside_file.is_file() && inside_file.is_file());
+        assert!(!outside.path().join("a.txt").exists());
+        assert!(!root.join("..").join("escaped.txt").exists());
+    }
+
+    #[test]
+    fn undo_refuses_a_record_that_points_outside_the_folder() {
+        let directory = tempdir().expect("temp directory");
+        let outside = tempdir().expect("outside");
+        let root = directory.path();
+        let moved = root.join("Docs").join("a.txt");
+        fs::create_dir_all(moved.parent().unwrap()).expect("folder");
+        fs::write(&moved, b"a").expect("moved");
+        let planted = outside.path().join("restored.txt");
+        let mut plan = plan_with(root, &[(&planted, &moved)]);
+        plan.actions[0].status = "executed".into();
+        let undone = undo_plan(plan).expect("undo");
+        assert_eq!(undone.actions[0].status, "undo_failed");
+        assert!(moved.is_file(), "the file was not touched");
+        assert!(!planted.exists());
+    }
+
+    #[test]
+    fn files_changed_after_the_preview_are_skipped() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let (kept, edited) = (root.join("kept.txt"), root.join("edited.txt"));
+        fs::write(&kept, b"same").expect("kept");
+        fs::write(&edited, b"before").expect("edited");
+        let mut plan = create_plan(request(root)).expect("plan");
+        assert_eq!(plan.actions.len(), 2);
+        fs::write(&edited, b"edited after the preview, now longer").expect("edit");
+        mark_changed_since_preview(&mut plan);
+        let status = |name: &str| {
+            plan.actions
+                .iter()
+                .find(|action| action.source_path.ends_with(name))
+                .map(|action| action.status.clone())
+                .unwrap()
+        };
+        assert_eq!(status("kept.txt"), "proposed");
+        assert_eq!(status("edited.txt"), "skipped");
     }
 }
