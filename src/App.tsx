@@ -5,6 +5,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import packageJson from '../package.json';
 import {
+  Ban,
   Bot,
   CalendarDays,
   CheckCircle2,
@@ -991,18 +992,26 @@ export default function App() {
           </> : <Empty text={t.nothing} />}
         </>}
 
-        {panel === 'categories' && <>
-          <h2>{t.catTitle}</h2><p>{t.catHint}</p>
-          <div className="form"><input value={name} onChange={(event) => setName(event.target.value)} placeholder={lang === 'ko' ? '카테고리 이름' : 'Category name'} /><input value={exts} onChange={(event) => setExts(event.target.value)} placeholder="pdf,xlsx" /><button onClick={addCategory}>{t.add}</button></div>
-          {cats.map((category, index) => <div className="card category-card" key={`${category.name}-${index}`}><b>{category.name}</b><span>.{category.extensions.join(', .')}</span><label><input type="checkbox" checked={category.enabled} onChange={() => setCats((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, enabled: !item.enabled } : item))} />{category.enabled ? 'ON' : 'OFF'}</label><button className="danger-action" onClick={() => removeCategory(index)}><Trash2 size={14} />{lang === 'ko' ? '삭제' : 'Remove'}</button></div>)}
-          <h3 className="section-title">{lang === 'ko' ? '파일명 규칙 (IF → THEN)' : 'Filename rules (IF → THEN)'}</h3>
-          <p>{lang === 'ko' ? '파일명에 키워드가 포함되면 지정 카테고리를 우선 적용합니다.' : 'A matching keyword takes precedence and routes the file to the chosen category.'}</p>
-          <div className="form"><input value={ruleKeyword} onChange={(event) => setRuleKeyword(event.target.value)} placeholder={lang === 'ko' ? '키워드 예: 영수증' : 'Keyword, e.g. receipt'} /><input value={ruleCategory} onChange={(event) => setRuleCategory(event.target.value)} placeholder={lang === 'ko' ? '대상 폴더' : 'Destination category'} /><button onClick={addRule}>{t.add}</button></div>
-          {rules.map((rule, index) => <div className="card rule-card" key={`${rule.keyword}-${index}`}><span>IF <b>{rule.keyword}</b> → THEN <b>{rule.category}</b></span><button className="danger-action" onClick={() => removeRule(index)}><Trash2 size={14} />{lang === 'ko' ? '삭제' : 'Remove'}</button></div>)}
-          <h3 className="section-title">{t.exceptions}</h3><p>{t.exceptionHint}</p>
-          <div className="form"><input value={excludedDraft} onChange={(event) => setExcludedDraft(event.target.value)} placeholder={lang === 'ko' ? '예: node_modules 또는 .env' : 'e.g. node_modules or .env'} /><button onClick={addExclusion}>{t.addException}</button></div>
-          {[...excludedPaths.map((value) => ({ value, kind: 'path' })), ...excludedExtensions.map((value) => ({ value: `.${value}`, kind: 'extension' }))].map((item) => <div className="card rule-card" key={`${item.kind}-${item.value}`}><span>{item.kind === 'path' ? '📁' : '✦'} {item.value}</span><button className="danger-action" onClick={() => item.kind === 'path' ? setExcludedPaths((previous) => previous.filter((value) => value !== item.value)) : setExcludedExtensions((previous) => previous.filter((value) => `.${value}` !== item.value))}><Trash2 size={14} />{lang === 'ko' ? '삭제' : 'Remove'}</button></div>)}
-        </>}
+        {panel === 'categories' && <div className="manage-grid">
+          <section className="manage-card">
+            <div className="manage-head"><Tags size={20} aria-hidden="true" /><h2>{t.catTitle}</h2></div>
+            <p>{t.catHint}</p>
+            <div className="form"><input value={name} onChange={(event) => setName(event.target.value)} placeholder={lang === 'ko' ? '카테고리 이름' : 'Category name'} /><input value={exts} onChange={(event) => setExts(event.target.value)} placeholder="pdf,xlsx" /><button onClick={addCategory}>{t.add}</button></div>
+            {cats.map((category, index) => <div className="card category-card" key={`${category.name}-${index}`}><b>{category.name}</b><span>.{category.extensions.join(', .')}</span><label><input type="checkbox" checked={category.enabled} onChange={() => setCats((previous) => previous.map((item, itemIndex) => itemIndex === index ? { ...item, enabled: !item.enabled } : item))} />{category.enabled ? 'ON' : 'OFF'}</label><button className="danger-action" onClick={() => removeCategory(index)}><Trash2 size={14} />{lang === 'ko' ? '삭제' : 'Remove'}</button></div>)}
+          </section>
+          <section className="manage-card">
+            <div className="manage-head"><ListFilter size={20} aria-hidden="true" /><h2>{lang === 'ko' ? '파일명 규칙 (IF → THEN)' : 'Filename rules (IF → THEN)'}</h2></div>
+            <p>{lang === 'ko' ? '파일명에 키워드가 포함되면 지정 카테고리를 우선 적용합니다.' : 'A matching keyword takes precedence and routes the file to the chosen category.'}</p>
+            <div className="form"><input value={ruleKeyword} onChange={(event) => setRuleKeyword(event.target.value)} placeholder={lang === 'ko' ? '키워드 예: 영수증' : 'Keyword, e.g. receipt'} /><input value={ruleCategory} onChange={(event) => setRuleCategory(event.target.value)} placeholder={lang === 'ko' ? '대상 폴더' : 'Destination category'} /><button onClick={addRule}>{lang === 'ko' ? '규칙 추가' : 'Add rule'}</button></div>
+            {rules.map((rule, index) => <div className="card rule-card" key={`${rule.keyword}-${index}`}><span>IF <b>{rule.keyword}</b> → THEN <b>{rule.category}</b></span><button className="danger-action" onClick={() => removeRule(index)}><Trash2 size={14} />{lang === 'ko' ? '삭제' : 'Remove'}</button></div>)}
+          </section>
+          <section className="manage-card manage-wide">
+            <div className="manage-head"><Ban size={20} aria-hidden="true" /><h2>{t.exceptions}</h2></div>
+            <p>{t.exceptionHint}</p>
+            <div className="form"><input value={excludedDraft} onChange={(event) => setExcludedDraft(event.target.value)} placeholder={lang === 'ko' ? '예: node_modules 또는 .env' : 'e.g. node_modules or .env'} /><button onClick={addExclusion}>{t.addException}</button></div>
+            {[...excludedPaths.map((value) => ({ value, kind: 'path' })), ...excludedExtensions.map((value) => ({ value: `.${value}`, kind: 'extension' }))].map((item) => <div className="card rule-card" key={`${item.kind}-${item.value}`}><span>{item.kind === 'path' ? '📁' : '✦'} {item.value}</span><button className="danger-action" onClick={() => item.kind === 'path' ? setExcludedPaths((previous) => previous.filter((value) => value !== item.value)) : setExcludedExtensions((previous) => previous.filter((value) => `.${value}` !== item.value))}><Trash2 size={14} />{lang === 'ko' ? '삭제' : 'Remove'}</button></div>)}
+          </section>
+        </div>}
 
         {panel === 'duplicates' && <>
           <h2>{t.duplicates}</h2><p>{lang === 'ko' ? '완전히 동일한 파일만 표시합니다. 선택한 파일은 확인 후 휴지통으로 보낼 수 있습니다.' : 'Only byte-identical files are shown. Selected files can be moved to the Recycle Bin after confirmation.'}</p>

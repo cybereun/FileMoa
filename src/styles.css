@@ -531,17 +531,19 @@ main {
 
 .form button,
 .card button {
-  padding: 10px 14px;
+  padding: 7px 14px;
   border-color: var(--accent);
-  background: var(--accent);
-  color: var(--accent-contrast);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent-strong);
+  font-size: 12.5px;
   font-weight: 650;
 }
 
 .form button:hover,
 .card button:hover:not(:disabled) {
   border-color: var(--accent-strong);
-  background: var(--accent-strong);
+  background: var(--accent-soft);
 }
 
 .card {
@@ -592,8 +594,9 @@ main {
 }
 
 .category-card {
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
+  gap: 12px;
 }
 
 .secondary-action,
@@ -620,8 +623,12 @@ main {
 
 .danger-action {
   border-color: #d6aaa6 !important;
-  background: var(--danger-soft) !important;
+  background: transparent !important;
   color: #823f3b !important;
+}
+
+.danger-action:hover:not(:disabled) {
+  background: var(--danger-soft) !important;
 }
 
 .danger-action:hover:not(:disabled) {
@@ -1442,4 +1449,106 @@ main {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/* Manage tab: two cards on top, one long card below. */
+.manage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+.manage-card {
+  min-width: 0;
+  padding: 14px 16px 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.manage-wide {
+  grid-column: 1 / -1;
+}
+
+.manage-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 2px;
+}
+
+.manage-head svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.workspace .manage-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 750;
+}
+
+.manage-card p {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.manage-card .form {
+  margin: 6px 0 10px;
+  gap: 8px;
+}
+
+.manage-card .form input {
+  flex: 1 1 110px;
+  height: 36px;
+  padding: 0 11px;
+  border-color: var(--line);
+  border-radius: 8px;
+  background: transparent;
+  font-size: 13px;
+}
+
+.manage-card .form button {
+  height: 36px;
+  white-space: nowrap;
+}
+
+.manage-wide .form input {
+  flex: 1 1 420px;
+}
+
+.manage-card .card {
+  margin: 0 0 6px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  font-size: 13px;
+}
+
+.manage-card .card button {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.manage-card .category-card span,
+.manage-card .category-card label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 860px) {
+  .manage-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Narrow windows stack the form fields in a column, where a flex basis would become a height. */
+@media (max-width: 760px) {
+  .manage-card .form input,
+  .manage-wide .form input {
+    flex: 0 0 auto;
+  }
 }
