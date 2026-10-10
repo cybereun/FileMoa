@@ -506,7 +506,7 @@ mod tests {
 
         // Only the executable: just bring the window forward.
         assert_eq!(
-            folder_request(&[exe.clone()]),
+            folder_request(std::slice::from_ref(&exe)),
             OpenFolderRequest {
                 path: None,
                 error: None
