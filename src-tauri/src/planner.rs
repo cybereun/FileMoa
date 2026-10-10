@@ -920,16 +920,31 @@ fn planned_category_roots(root: &Path, req: &PlanRequest) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Folders that a sync client keeps online: `OneDrive`, `OneDrive - <org>`
+/// (work and school accounts), Dropbox, Google Drive (`Google Drive`, and
+/// `내 드라이브` / `My Drive` in Drive for desktop) and iCloud Drive.
+fn is_cloud_sync_folder(path: &Path) -> bool {
+    path.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy().to_lowercase();
+        name == "onedrive"
+            || name.starts_with("onedrive - ")
+            || name == "dropbox"
+            || name.starts_with("dropbox (")
+            || name == "google drive"
+            || name == "내 드라이브"
+            || name == "my drive"
+            || name == "icloud drive"
+            || name == "iclouddrive"
+    })
+}
+
 fn root_warnings(root: &Path) -> Vec<String> {
     let key = path_key(root);
     let mut warnings = Vec::new();
     if key.starts_with("\\\\") {
         warnings.push("네트워크 드라이브입니다. 연결이 끊기면 이동을 중단하고 오류를 기록합니다. / Network location: a disconnect will be reported.".into());
     }
-    if key.contains("\\onedrive\\")
-        || key.contains("\\google drive\\")
-        || key.contains("\\dropbox\\")
-    {
+    if is_cloud_sync_folder(root) {
         warnings.push("클라우드 동기화 폴더입니다. 온라인 전용 파일은 강제로 다운로드하지 않습니다. / Cloud folder: online-only files are not forced to download.".into());
     }
     if key.len() >= 2 && key.as_bytes()[1] == b':' && !key.starts_with("c:\\") {
@@ -2646,5 +2661,32 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("접근")));
+    }
+
+    #[test]
+    fn cloud_sync_folders_are_recognised_by_name() {
+        for yes in [
+            r"C:\Users\a\OneDrive",
+            r"C:\Users\a\OneDrive - 대구광역시교육청\문서",
+            r"C:\Users\a\OneDrive - Contoso Ltd",
+            r"D:\Dropbox\work",
+            r"D:\Dropbox (Personal)\work",
+            r"G:\내 드라이브\AI",
+            r"G:\My Drive\AI",
+            r"C:\Users\a\Google Drive\x",
+            r"C:\Users\a\iCloudDrive\x",
+        ] {
+            assert!(is_cloud_sync_folder(Path::new(yes)), "{yes} should count as a cloud folder");
+        }
+        for no in [
+            r"C:\Users\a\Documents\onedrive-notes",
+            r"C:\Users\a\OneDriveBackup",
+            r"C:\Users\a\Downloads",
+            r"D:\drive\mine",
+        ] {
+            assert!(!is_cloud_sync_folder(Path::new(no)), "{no} is an ordinary folder");
+        }
+        let warnings = root_warnings(Path::new(r"C:\Users\a\OneDrive - 대구광역시교육청\문서"));
+        assert!(warnings.iter().any(|w| w.contains("클라우드")));
     }
 }
