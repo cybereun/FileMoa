@@ -302,6 +302,16 @@ export default function App() {
     }
   }
 
+  function runTitle(run: RunSummary): string {
+    const interrupted = run.status === 'interrupted' ? (lang === 'ko' ? ' · 중단됨' : ' · interrupted') : '';
+    if (run.executedCount === 0 && run.undoneCount > 0) {
+      return (lang === 'ko' ? `${run.undoneCount}개 모두 되돌림` : `${run.undoneCount} moved, all undone`) + interrupted;
+    }
+    const moved = lang === 'ko' ? `${run.executedCount}개 이동` : `${run.executedCount} moved`;
+    const undone = run.undoneCount > 0 ? (lang === 'ko' ? ` · ${run.undoneCount}개 되돌림` : ` · ${run.undoneCount} undone`) : '';
+    return moved + undone + interrupted;
+  }
+
   async function execute() {
     if (!plan) return;
     const confirmation = total >= 100
@@ -857,7 +867,7 @@ export default function App() {
 
         {panel === 'history' && <>
           <h2>{t.history}</h2>
-          {runs.length ? runs.map((run) => <div className="card" key={run.runId}><b>{run.executedCount} files moved{run.status === 'interrupted' ? (lang === 'ko' ? ' · 중단됨' : ' · interrupted') : ''}{run.undoneCount > 0 ? (lang === 'ko' ? ` · ${run.undoneCount}개 되돌림` : ` · ${run.undoneCount} undone`) : ''}</b><span>{run.rootPath}</span><span className="muted">{run.updatedAt ? new Date(run.updatedAt).toLocaleString() : ''} · {run.exclusionCount} exclusions · {run.errorCount} errors</span>{run.executedCount > 0 && <button onClick={() => void openUndoPreview(run.runId)}>{t.undo}</button>}</div>) : <Empty text={t.nothing} />}
+          {runs.length ? runs.map((run) => <div className="card" key={run.runId}><b>{runTitle(run)}</b><span>{run.rootPath}</span><span className="muted">{run.updatedAt ? new Date(run.updatedAt).toLocaleString() : ''} · {lang === 'ko' ? `제외 ${run.exclusionCount}개 · 오류 ${run.errorCount}개` : `${run.exclusionCount} exclusions · ${run.errorCount} errors`}</span>{run.executedCount > 0 && <button onClick={() => void openUndoPreview(run.runId)}>{t.undo}</button>}</div>) : <Empty text={t.nothing} />}
         </>}
 
         {panel === 'ai' && <>

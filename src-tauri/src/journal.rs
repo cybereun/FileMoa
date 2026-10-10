@@ -56,6 +56,8 @@ struct JournalEntry {
     destination_path: String,
     reason: String,
     collision: bool,
+    #[serde(default)]
+    created_dirs: Vec<String>,
 }
 
 pub struct RunJournal {
@@ -132,6 +134,7 @@ impl RunJournal {
             destination_path: action.destination_path.clone(),
             reason: action.reason.clone(),
             collision: action.collision,
+            created_dirs: action.created_dirs.clone(),
         };
         let mut line = serde_json::to_vec(&entry).map_err(|e| {
             format!("저널 항목을 만들 수 없습니다 / cannot encode journal entry: {e}")
@@ -199,6 +202,7 @@ fn apply_journal(plan: &mut OrganizationPlan, journal_path: &Path) {
         action.destination_path = entry.destination_path;
         action.reason = entry.reason;
         action.collision = entry.collision;
+        action.created_dirs = entry.created_dirs;
         if action.status == "failed" {
             let message = format!("{}: {}", action.source_path, action.reason);
             plan.errors.push(message);
@@ -417,6 +421,7 @@ mod tests {
             size_bytes: 1,
             modified_unix_secs: None,
             collision: false,
+            created_dirs: Vec::new(),
         }
     }
 
@@ -607,5 +612,29 @@ mod tests {
         assert_ne!(rows[0].run_id, rows[1].run_id);
         let again = vec![load_run(runs.path(), &rows[0].run_id).expect("load")];
         assert_eq!(import_legacy(runs.path(), again).expect("second"), 0);
+    }
+
+    #[test]
+    fn recovered_run_remembers_the_folders_it_created() {
+        let root = tempdir().expect("root");
+        let runs = tempdir().expect("runs");
+        let source = root.path().join("a.txt");
+        fs::write(&source, b"a").expect("source");
+        let folder = root.path().join("Text");
+        let destination = folder.join("a.txt");
+        let mut plan = plan_for(root.path(), vec![action(&source, &destination)]);
+        let mut journal = RunJournal::begin(runs.path(), &mut plan).expect("begin");
+        fs::create_dir_all(&folder).expect("folder");
+        fs::rename(&source, &destination).expect("move");
+        plan.actions[0].status = "executed".into();
+        plan.actions[0].created_dirs = vec![folder.display().to_string()];
+        journal.record(0, &plan.actions[0]).expect("journal");
+        drop(journal);
+
+        let recovered = recover(runs.path()).expect("recover");
+        assert_eq!(recovered[0].actions[0].created_dirs.len(), 1);
+        undo_plan(recovered.into_iter().next().unwrap()).expect("undo");
+        assert!(source.is_file());
+        assert!(!folder.exists());
     }
 }

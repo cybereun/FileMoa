@@ -100,6 +100,10 @@ pub struct PlannedAction {
     pub modified_unix_secs: Option<u64>,
     #[serde(default)]
     pub collision: bool,
+    /// Folders this move had to create (shallowest first). Undo removes the
+    /// ones that are empty again; folders that already existed are never listed.
+    #[serde(default)]
+    pub created_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -772,6 +776,7 @@ pub fn create_plan(req: PlanRequest) -> Result<OrganizationPlan, String> {
             size_bytes: metadata.len(),
             modified_unix_secs,
             collision,
+            created_dirs: Vec::new(),
         });
     }
     Ok(OrganizationPlan {
@@ -934,8 +939,11 @@ fn run_action(plan: &mut OrganizationPlan, index: usize) {
         action.status = "skipped".into();
         return;
     }
+    let mut created_dirs = Vec::new();
     if let Some(parent) = destination.parent() {
+        created_dirs = missing_ancestors(parent);
         if let Err(error) = fs::create_dir_all(parent) {
+            remove_empty_dirs(&created_dirs);
             action.status = "failed".into();
             action.reason =
                 format!("폴더를 만들 수 없습니다 / cannot create destination folder: {error}");
@@ -948,14 +956,40 @@ fn run_action(plan: &mut OrganizationPlan, index: usize) {
         Ok((destination, collision)) => {
             action.collision = action.collision || collision;
             action.destination_path = destination.display().to_string();
+            action.created_dirs = created_dirs
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect();
             action.status = "executed".into();
         }
         Err(error) => {
+            remove_empty_dirs(&created_dirs);
             action.status = "failed".into();
             action.reason = format!("이동 실패 / move failed: {error}");
             plan.errors
                 .push(format!("{}: {}", from_path.display(), action.reason));
         }
+    }
+}
+
+/// Folders on the way to `dir` that do not exist yet, shallowest first.
+fn missing_ancestors(dir: &Path) -> Vec<PathBuf> {
+    let mut missing: Vec<PathBuf> = dir
+        .ancestors()
+        .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !ancestor.exists())
+        .map(Path::to_path_buf)
+        .collect();
+    missing.reverse();
+    missing
+}
+
+/// Remove folders that are empty, deepest first. `remove_dir` refuses a
+/// folder that still holds anything, so this can never delete user files.
+fn remove_empty_dirs(dirs: &[PathBuf]) {
+    let mut ordered: Vec<&PathBuf> = dirs.iter().collect();
+    ordered.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+    for dir in ordered {
+        let _ = fs::remove_dir(dir);
     }
 }
 
@@ -1009,6 +1043,14 @@ pub fn undo_plan(mut plan: OrganizationPlan) -> Result<OrganizationPlan, String>
             }
         }
     }
+    // Only after every file is back: a folder can be shared by several moves.
+    let created: Vec<PathBuf> = plan
+        .actions
+        .iter()
+        .filter(|action| action.status == "undone")
+        .flat_map(|action| action.created_dirs.iter().map(PathBuf::from))
+        .collect();
+    remove_empty_dirs(&created);
     Ok(plan)
 }
 
@@ -1329,6 +1371,7 @@ mod tests {
                 size_bytes: 5,
                 modified_unix_secs: None,
                 collision: false,
+                created_dirs: Vec::new(),
             }],
             exclusions: Vec::new(),
             errors: Vec::new(),
@@ -1395,6 +1438,7 @@ mod tests {
                 size_bytes: 8,
                 modified_unix_secs: None,
                 collision: false,
+                created_dirs: Vec::new(),
             }],
             exclusions: Vec::new(),
             errors: Vec::new(),
@@ -1466,5 +1510,96 @@ mod tests {
         assert_eq!(large.items.len(), 2);
         assert!(hash_file(&cloud_a).is_err());
         assert!(hash_file(&local_a).is_ok());
+    }
+
+    fn plan_with(root: &Path, pairs: &[(&Path, &Path)]) -> OrganizationPlan {
+        OrganizationPlan {
+            root_path: root.display().to_string(),
+            actions: pairs
+                .iter()
+                .map(|(source, destination)| PlannedAction {
+                    source_path: source.display().to_string(),
+                    destination_path: destination.display().to_string(),
+                    category: "Test".into(),
+                    reason: "test".into(),
+                    status: "proposed".into(),
+                    size_bytes: 1,
+                    modified_unix_secs: None,
+                    collision: false,
+                    created_dirs: Vec::new(),
+                })
+                .collect(),
+            exclusions: Vec::new(),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            created_at: Utc::now().to_rfc3339(),
+            basis: "type".into(),
+            language: "ko".into(),
+            mode: "safe".into(),
+            root_paths: vec![root.display().to_string()],
+            run_id: String::new(),
+        }
+    }
+
+    #[test]
+    fn undo_removes_only_the_folders_the_run_created() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let (a, b, c) = (root.join("a.txt"), root.join("b.txt"), root.join("c.txt"));
+        for file in [&a, &b, &c] {
+            fs::write(file, b"x").expect("source");
+        }
+        // `Kept` existed before the run (and is empty); `Docs/Text` is new and shared.
+        fs::create_dir_all(root.join("Kept")).expect("pre-existing folder");
+        let plan = plan_with(
+            root,
+            &[
+                (&a, &root.join("Docs").join("Text").join("a.txt")),
+                (&b, &root.join("Docs").join("Text").join("b.txt")),
+                (&c, &root.join("Kept").join("c.txt")),
+            ],
+        );
+        let done = execute_plan_with(plan, |_, _| Ok(())).expect("execute");
+        assert_eq!(done.actions[0].created_dirs.len(), 2); // Docs, Docs/Text
+        assert!(done.actions[1].created_dirs.is_empty()); // folder already made by the first move
+        assert!(done.actions[2].created_dirs.is_empty()); // Kept pre-existed
+
+        let undone = undo_plan(done).expect("undo");
+        assert!(undone
+            .actions
+            .iter()
+            .all(|action| action.status == "undone"));
+        assert!(a.is_file() && b.is_file() && c.is_file());
+        assert!(!root.join("Docs").exists(), "new folders are cleaned up");
+        assert!(root.join("Kept").is_dir(), "a folder the user had stays");
+    }
+
+    #[test]
+    fn undo_keeps_a_created_folder_that_now_holds_other_files() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let a = root.join("a.txt");
+        fs::write(&a, b"x").expect("source");
+        let plan = plan_with(root, &[(&a, &root.join("Docs").join("a.txt"))]);
+        let done = execute_plan_with(plan, |_, _| Ok(())).expect("execute");
+        fs::write(root.join("Docs").join("mine.txt"), b"keep me").expect("user file");
+        undo_plan(done).expect("undo");
+        assert!(a.is_file());
+        assert_eq!(
+            fs::read(root.join("Docs").join("mine.txt")).unwrap(),
+            b"keep me"
+        );
+    }
+
+    #[test]
+    fn a_failed_move_does_not_leave_the_folders_it_created() {
+        let directory = tempdir().expect("temp directory");
+        let root = directory.path();
+        let missing = root.join("not-there.txt");
+        // The source vanished before execution: nothing may be created.
+        let plan = plan_with(root, &[(&missing, &root.join("Docs").join("x.txt"))]);
+        let done = execute_plan_with(plan, |_, _| Ok(())).expect("execute");
+        assert_eq!(done.actions[0].status, "skipped");
+        assert!(!root.join("Docs").exists());
     }
 }
