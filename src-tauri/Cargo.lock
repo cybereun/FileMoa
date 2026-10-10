@@ -839,6 +839,7 @@ dependencies = [
  "tauri-plugin-store",
  "tauri-plugin-updater",
  "tempfile",
+ "tokio",
  "uuid",
  "walkdir",
  "windows-sys 0.61.2",

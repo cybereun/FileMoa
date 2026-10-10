@@ -100,6 +100,8 @@ type AiResult = {
   requestCount: number;
   suggestions: AiSuggestion[];
   proposedCategories: string[];
+  failedCount?: number;
+  failedMessage?: string | null;
 };
 type Tab = 'organize' | 'manage' | 'safety';
 type Panel = 'plan' | 'categories' | 'duplicates' | 'history' | 'large' | 'empty' | 'ai';
@@ -213,6 +215,7 @@ export default function App() {
   const [selectedAi, setSelectedAi] = useState('ollama');
   const [aiKeyDraft, setAiKeyDraft] = useState('');
   const [aiModelDraft, setAiModelDraft] = useState('');
+  const [aiModelOptions, setAiModelOptions] = useState<string[]>([]);
   const [aiMessage, setAiMessage] = useState('');
   const [aiResult, setAiResult] = useState<AiResult | null>(null);
   const [approvedAiIds, setApprovedAiIds] = useState<number[]>([]);
@@ -537,7 +540,25 @@ export default function App() {
       const result = await invoke<AiResult>('classify_files', { providerId: selectedProvider.id, files, categories });
       setAiResult(result);
       setApprovedAiIds([]);
-      setAiMessage(lang === 'ko' ? `${result.suggestions.length}개 제안을 받았습니다. 검토 후 승인하세요.` : `${result.suggestions.length} suggestions received. Review and approve them.`);
+      const failed = result.failedCount ?? 0;
+      const partial = failed
+        ? (lang === 'ko' ? ` ${failed}개 파일은 응답을 받지 못해 제외했습니다(${result.failedMessage ?? ''}). 나머지만 검토하세요.` : ` ${failed} files got no answer and were left out (${result.failedMessage ?? ''}). Review the rest.`)
+        : '';
+      setAiMessage((lang === 'ko' ? `${result.suggestions.length}개 제안을 받았습니다. 검토 후 승인하세요.` : `${result.suggestions.length} suggestions received. Review and approve them.`) + partial);
+    } catch (error) {
+      setAiMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadAiModels() {
+    if (!selectedProvider) return;
+    setBusy(true);
+    try {
+      const models = await invoke<string[]>('list_ai_models', { providerId: selectedProvider.id });
+      setAiModelOptions(models);
+      setAiMessage(lang === 'ko' ? `사용 가능한 모델 ${models.length}개를 불러왔습니다. 모델 칸에서 선택하세요.` : `${models.length} models available. Pick one in the model field.`);
     } catch (error) {
       setAiMessage(String(error));
     } finally {
@@ -911,10 +932,10 @@ export default function App() {
           <div className="panel-heading"><div><h2>{t.aiTitle}</h2><p>{t.aiHint}</p></div><button className="icon-button" onClick={() => void refreshAiProviders()} disabled={busy} aria-label={t.retry}><RefreshCw size={18} /></button></div>
           <div className="privacy-callout"><ShieldCheck size={19} /><span>{t.localOnly}</span></div>
           <h3>{t.selected}</h3>
-          <div className="provider-grid">{aiProviders.map((provider) => <button className={`provider-card ${selectedAi === provider.id ? 'selected' : ''}`} key={provider.id} onClick={() => { setSelectedAi(provider.id); setAiKeyDraft(''); }}><span className="provider-name"><Bot size={17} /> {provider.displayName}</span><span className="provider-state">{providerStatus(provider.id, provider.keyPresent, provider.available, lang)}</span></button>)}</div>
+          <div className="provider-grid">{aiProviders.map((provider) => <button className={`provider-card ${selectedAi === provider.id ? 'selected' : ''}`} key={provider.id} onClick={() => { setSelectedAi(provider.id); setAiKeyDraft(''); setAiModelOptions([]); }}><span className="provider-name"><Bot size={17} /> {provider.displayName}</span><span className="provider-state">{providerStatus(provider.id, provider.keyPresent, provider.available, lang)}</span></button>)}</div>
           {selectedProvider && <div className="ai-editor"><div className="ai-editor-title"><h3>{selectedProvider.displayName}</h3>{selectedProvider.id === 'ollama' && <span className={selectedProvider.available ? 'status-good' : 'status-muted'}>{selectedProvider.endpoint}</span>}</div>
             {selectedProvider.id !== 'ollama' && <label className="field-label">{t.apiKey}<input type="password" value={aiKeyDraft} onChange={(event) => setAiKeyDraft(event.target.value)} placeholder={selectedProvider.keyPresent ? '••••••••••••••••' : 'sk-…'} autoComplete="new-password" /></label>}
-            <label className="field-label">{t.model}{selectedProvider.id === 'ollama' && selectedProvider.ollamaModels.length ? <select value={aiModelDraft} onChange={(event) => setAiModelDraft(event.target.value)}>{selectedProvider.ollamaModels.map((model) => <option value={model} key={model}>{model}</option>)}</select> : <input value={aiModelDraft} onChange={(event) => setAiModelDraft(event.target.value)} placeholder={selectedProvider.model} />}<small>{t.modelHint}</small></label>
+            <label className="field-label">{t.model}{selectedProvider.id === 'ollama' && selectedProvider.ollamaModels.length ? <select value={aiModelDraft} onChange={(event) => setAiModelDraft(event.target.value)}>{selectedProvider.ollamaModels.map((model) => <option value={model} key={model}>{model}</option>)}</select> : <><input value={aiModelDraft} onChange={(event) => setAiModelDraft(event.target.value)} placeholder={selectedProvider.model} list="ai-model-options" /><datalist id="ai-model-options">{aiModelOptions.map((model) => <option value={model} key={model} />)}</datalist></>}<small>{t.modelHint}</small>{selectedProvider.id !== 'ollama' && selectedProvider.keyPresent && <button type="button" className="secondary-action" onClick={() => void loadAiModels()} disabled={busy}>{lang === 'ko' ? '사용 가능한 모델 불러오기' : 'Load available models'}</button>}</label>
             <div className="ai-actions"><button onClick={() => void saveAiProvider()} disabled={busy || (selectedProvider.id !== 'ollama' && !aiKeyDraft && !selectedProvider.keyPresent)}><CheckCircle2 size={16} /> {t.save}</button><button onClick={() => void testAiProvider()} disabled={busy || (selectedProvider.id !== 'ollama' && !selectedProvider.keyPresent && !aiKeyDraft)}><RefreshCw size={16} /> {t.test}</button>{selectedProvider.id !== 'ollama' && selectedProvider.keyPresent && <button className="danger-action" onClick={() => void removeAiKey()} disabled={busy}><Trash2 size={16} /> {t.removeKey}</button>}</div>
             {selectedProvider.id !== 'ollama' && <a className="registration-link" href={selectedProvider.registrationUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} /> {t.getKey}</a>}
             {selectedProvider.id === 'ollama' && <p className="ollama-help"><Clock3 size={15} /> {selectedProvider.ollamaModels.length ? `${t.ollamaModels}: ${selectedProvider.ollamaModels.join(', ')}` : t.ollamaMissing}</p>}

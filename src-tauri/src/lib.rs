@@ -339,6 +339,7 @@ pub fn run() {
             ai::remove_ai_provider_key,
             ai::test_ai_provider_connection,
             ai::classify_files,
+            ai::list_ai_models,
             ai::apply_ai_suggestions
         ])
         .run(tauri::generate_context!())
