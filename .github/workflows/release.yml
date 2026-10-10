@@ -74,6 +74,9 @@ jobs:
           "prerelease=$($prerelease.ToString().ToLower())" >> $env:GITHUB_OUTPUT
           if ($publish) { Write-Host "Publishing v$version (prerelease=$prerelease)" }
           else { Write-Host "Release v$version already exists; checks passed, nothing published. Bump the version to ship." }
+          # `gh release view` exits 1 when the release does not exist yet, which is the
+          # normal case here; do not let that become this step's result.
+          exit 0
       - uses: tauri-apps/tauri-action@v0
         if: steps.decide.outputs.publish == 'true'
         env:
