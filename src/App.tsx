@@ -25,7 +25,7 @@ import {
   X,
 } from 'lucide-react';
 import './styles.css';
-import { basename, formatBytes, providerStatus, requestCount, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
+import { basename, cloudOnlyNotice as cloudOnlyMessage, formatBytes, isCancelledError, progressPercent, providerStatus, requestCount, runTitle as runTitleText, shouldOpenUpdateModal, shouldUseStartupPath } from './utils';
 
 type Category = { name: string; extensions: string[]; enabled: boolean };
 type KeywordRule = { keyword: string; category: string; caseSensitive?: boolean };
@@ -284,7 +284,7 @@ export default function App() {
   }
 
   function failure(error: unknown) {
-    const cancelled = /취소되었습니다|was cancelled/.test(String(error));
+    const cancelled = isCancelledError(error);
     setNotice(cancelled ? (lang === 'ko' ? '작업을 취소했습니다.' : 'The operation was cancelled.') : String(error));
   }
 
@@ -334,15 +334,7 @@ export default function App() {
     }
   }
 
-  function runTitle(run: RunSummary): string {
-    const interrupted = run.status === 'interrupted' ? (lang === 'ko' ? ' · 중단됨' : ' · interrupted') : '';
-    if (run.executedCount === 0 && run.undoneCount > 0) {
-      return (lang === 'ko' ? `${run.undoneCount}개 모두 되돌림` : `${run.undoneCount} moved, all undone`) + interrupted;
-    }
-    const moved = lang === 'ko' ? `${run.executedCount}개 이동` : `${run.executedCount} moved`;
-    const undone = run.undoneCount > 0 ? (lang === 'ko' ? ` · ${run.undoneCount}개 되돌림` : ` · ${run.undoneCount} undone`) : '';
-    return moved + undone + interrupted;
-  }
+  const runTitle = (run: RunSummary) => runTitleText(run, lang);
 
   async function execute() {
     if (!plan) return;
@@ -424,12 +416,7 @@ export default function App() {
     }
   }
 
-  function cloudOnlyNotice(count: number): string {
-    if (!count) return '';
-    return lang === 'ko'
-      ? `클라우드 전용(온라인 전용) 파일 ${count}개는 다운로드를 막기 위해 검사에서 제외했습니다.`
-      : `${count} cloud-only file(s) were skipped so they are not downloaded.`;
-  }
+  const cloudOnlyNotice = (count: number) => cloudOnlyMessage(count, lang);
 
   async function scanLargeFiles() {
     if (!path) return;
@@ -978,7 +965,7 @@ function ProgressBar({ progress, lang, onCancel }: { progress: ProgressInfo; lan
   };
   const label = labels[progress.phase][lang === 'ko' ? 0 : 1];
   const known = progress.total > 0;
-  const percent = known ? Math.min(100, Math.round((progress.done / progress.total) * 100)) : 0;
+  const percent = progressPercent(progress.done, progress.total) ?? 0;
   const count = progress.phase === 'hash'
     ? `${formatBytes(progress.done)} / ${formatBytes(progress.total)}`
     : known ? `${progress.done} / ${progress.total}` : `${progress.done}`;
